@@ -20,10 +20,18 @@ Column {
     return value < 0 ? 0 : value
   }
 
-  // The slider owns the number while dragging; binding to `level` would snap
-  // the knob back under the finger between state updates.
-  property real localValue: -1
-  readonly property real shownValue: localValue >= 0 ? localValue : level
+  // Shown until the light reports it back; binding to `level` would snap the
+  // knob out from under the cursor.
+  PendingValue { id: pendingBrightness }
+  readonly property real shownValue: pendingBrightness.active
+    ? pendingBrightness.value : level
+
+  onEntityChanged: {
+    if (pendingBrightness.active
+        && Model.brightnessSettled(control.entity, pendingBrightness.value)) {
+      pendingBrightness.clear()
+    }
+  }
 
   spacing: Style.spacing.lg
 
@@ -39,13 +47,14 @@ Column {
     maximum: 100
     step: 1
 
-    onMoved: function(value) { control.localValue = value }
+    onMoved: function(value) { pendingBrightness.hold(value) }
     // On release only: a call per pixel floods Home Assistant and makes the
     // light stutter trying to follow.
     onReleased: function(value) {
-      control.localValue = -1
+      pendingBrightness.commit(value)
       control.hass.setBrightness(control.entityId, value)
     }
+    onCanceled: pendingBrightness.clear()
   }
 
   ColorControls {

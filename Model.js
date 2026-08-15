@@ -281,6 +281,62 @@ function lightColorTempData(entity, kelvin) {
   return { color_temp_kelvin: Math.round(clampNumber(kelvin, range.min, range.max)) }
 }
 
+// ------------------------------------------------ optimistic reconciliation
+
+// A control shows the value someone picked until the entity reports it back.
+// The tolerances are the cost of the round trip: brightness travels as a
+// 0-255 byte, colour temperature as an integer mired, and a light answers in
+// whatever colour space it speaks.
+
+function settledWithin(live, wanted, slack) {
+  if (typeof live !== "number" || !isFinite(live)) return false
+  if (typeof wanted !== "number" || !isFinite(wanted)) return false
+  return Math.abs(live - wanted) <= slack
+}
+
+// Hue is circular: 358 and 2 are four degrees apart, not 356.
+function hueGap(one, other) {
+  var gap = Math.abs(one - other) % 360
+  return Math.min(gap, 360 - gap)
+}
+
+function brightnessSettled(entity, percent) {
+  if (typeof percent !== "number" || !isFinite(percent)) return false
+  // Zero is a turn_off, and a light that is off publishes no brightness.
+  if (percent <= 0) return !isOn(entity)
+  return settledWithin(brightnessPercent(entity), percent, 0.5)
+}
+
+function colorSettled(entity, hue, saturation) {
+  if (isColorTempActive(entity)) return false
+  var live = hsColor(entity)
+  if (!live) return false
+  if (!settledWithin(live.saturation, saturation, 2)) return false
+  // Hue survives the light's colour space in proportion to saturation, and at
+  // the centre of the wheel every angle is the same white.
+  return hueGap(live.hue, hue) <= Math.min(180, 500 / saturation)
+}
+
+// Compared in mireds, which is what Home Assistant stores: the same kelvin
+// tolerance would be four kelvin at the warm end and forty at the cold one.
+function colorTempSettled(entity, kelvin) {
+  if (typeof kelvin !== "number" || !isFinite(kelvin) || kelvin <= 0) return false
+  if (!isColorTempActive(entity)) return false
+  var live = colorTempKelvin(entity)
+  if (live <= 0) return false
+  return settledWithin(1000000 / live, 1000000 / kelvin, 1)
+}
+
+function volumeSettled(entity, level) {
+  return settledWithin(volumeLevel(entity), level, 0.01)
+}
+
+function temperatureSettled(entity, attribute, value, step) {
+  var slack = typeof step === "number" && isFinite(step) && step > 0
+    ? step / 2 : 0.25
+  return settledWithin(attrs(entity)[attribute], value, slack)
+}
+
 // ------------------------------------------------------- colour conversion
 
 // Ported from the frontend's temperature2rgb: a temperature swatch has to be

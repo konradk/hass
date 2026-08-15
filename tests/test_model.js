@@ -767,6 +767,109 @@ section("colour capabilities and expansion", () => {
   eq("an unavailable light offers no colour control", gone.color, false);
 });
 
+section("optimistic reconciliation", () => {
+  const lit = (attributes) => entity("light.a", "on", attributes);
+
+  eq("brightness settles on the byte it rounded to",
+     Model.brightnessSettled(lit({ brightness: 128 }), 50), true);
+  eq("a different brightness does not settle it",
+     Model.brightnessSettled(lit({ brightness: 128 }), 70), false);
+  eq("zero settles once the light is off",
+     Model.brightnessSettled(entity("light.a", "off"), 0), true);
+  eq("zero does not settle while the light is on",
+     Model.brightnessSettled(lit({ brightness: 128 }), 0), false);
+  // One slider step must not settle against the value the light still holds,
+  // or the knob snaps back to it.
+  eq("a brightness one step away does not settle it",
+     Model.brightnessSettled(lit({ brightness: 128 }), 51), false);
+  eq("a positive brightness never settles against an off light",
+     Model.brightnessSettled(entity("light.a", "off"), 50), false);
+
+  eq("hue is measured the short way round the wheel",
+     Model.hueGap(350, 10), 20);
+  eq("hue gap is symmetric", Model.hueGap(10, 350), 20);
+  eq("opposite hues are half a circle apart", Model.hueGap(0, 180), 180);
+  eq("the same hue has no gap", Model.hueGap(210, 210), 0);
+
+  eq("a colour settles on a near-enough hue",
+     Model.colorSettled(lit({ hs_color: [211, 60] }), 210, 60), true);
+  eq("hue wraps rather than reading as a full circle apart",
+     Model.colorSettled(lit({ hs_color: [359, 80] }), 0.5, 80), true);
+  eq("a different hue does not settle it",
+     Model.colorSettled(lit({ hs_color: [211, 60] }), 120, 60), false);
+  // White has no hue of its own, so any angle confirms it.
+  eq("an unsaturated pick ignores hue",
+     Model.colorSettled(lit({ hs_color: [30, 0] }), 210, 0), true);
+  eq("a light on its temperature channel is not showing a colour",
+     Model.colorSettled(lit({ hs_color: [211, 60], color_mode: "color_temp" }),
+                        210, 60), false);
+  // Near the centre of the wheel an xy round trip barely preserves hue, so the
+  // tolerance has to widen or the knob freezes until the pending expires.
+  eq("a barely saturated pick settles on any hue",
+     Model.colorSettled(lit({ hs_color: [45, 3] }), 200, 3), true);
+  eq("a saturated pick still needs the hue it asked for",
+     Model.colorSettled(lit({ hs_color: [216, 100] }), 210, 100), false);
+  eq("a colour never settles against a light with no colour",
+     Model.colorSettled(entity("light.a", "off"), 210, 60), false);
+  eq("a colour never settles against an unavailable light",
+     Model.colorSettled(entity("light.a", "unavailable"), 210, 60), false);
+  eq("a colour never settles against a missing entity",
+     Model.colorSettled(null, 210, 60), false);
+
+  const white = (kelvin) =>
+    lit({ color_mode: "color_temp", color_temp_kelvin: kelvin });
+  eq("warmth settles through the mired rounding",
+     Model.colorTempSettled(white(4000), 4008), true);
+  eq("a warmth a slider step away does not settle it",
+     Model.colorTempSettled(white(4000), 4100), false);
+  // A slider step is only 1.17 mireds at 6500K, so the slack has to stay under
+  // it even though a step is 100 kelvin wide down at 4000K.
+  eq("the mired rounding is still absorbed at the cold end",
+     Model.colorTempSettled(white(6494), 6500), true);
+  eq("a warmth one step away at the cold end does not settle it",
+     Model.colorTempSettled(white(6500), 6550), false);
+  eq("a light showing a hue has no warmth to settle",
+     Model.colorTempSettled(lit({ hs_color: [211, 60] }), 4000), false);
+  eq("a nonsensical kelvin never settles",
+     Model.colorTempSettled(white(4000), 0), false);
+  eq("a negative kelvin never settles",
+     Model.colorTempSettled(white(4000), -4000), false);
+  eq("warmth never settles against an off light",
+     Model.colorTempSettled(entity("light.a", "off"), 4000), false);
+  eq("warmth never settles against an unavailable light",
+     Model.colorTempSettled(entity("light.a", "unavailable"), 4000), false);
+  eq("warmth never settles against a missing entity",
+     Model.colorTempSettled(null, 4000), false);
+
+  eq("volume settles on the level it reports",
+     Model.volumeSettled(entity("media_player.a", "playing",
+                                { volume_level: 0.35 }), 0.35), true);
+  eq("a different volume does not settle it",
+     Model.volumeSettled(entity("media_player.a", "playing",
+                                { volume_level: 0.35 }), 0.5), false);
+  eq("volume never settles against an unavailable player",
+     Model.volumeSettled(entity("media_player.a", "unavailable"), 0.35), false);
+  eq("volume never settles against an off player",
+     Model.volumeSettled(entity("media_player.a", "off"), 0.35), false);
+  eq("volume never settles against a missing entity",
+     Model.volumeSettled(null, 0.35), false);
+
+  const stat = entity("climate.a", "heat", { temperature: 21 });
+  eq("a setpoint settles within half a step",
+     Model.temperatureSettled(stat, "temperature", 21.2, 0.5), true);
+  eq("a setpoint a step away does not settle",
+     Model.temperatureSettled(stat, "temperature", 21.5, 0.5), false);
+  eq("a missing attribute never settles",
+     Model.temperatureSettled(stat, "target_temp_low", 21, 0.5), false);
+  // A thermostat that reports no step falls back to a quarter degree.
+  eq("an absent step settles within a quarter degree",
+     Model.temperatureSettled(stat, "temperature", 21.2), true);
+  eq("an absent step rejects more than a quarter degree",
+     Model.temperatureSettled(stat, "temperature", 21.3), false);
+  eq("a zero step falls back to the same quarter degree",
+     Model.temperatureSettled(stat, "temperature", 21.2, 0), true);
+});
+
 console.log();
 if (failures) {
   console.log(`FAILED: ${failures} of ${checks} checks`);

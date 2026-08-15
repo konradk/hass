@@ -25,8 +25,16 @@ Item {
   }
   readonly property bool hasVolume: capabilities.mediaVolume
 
-  property real localVolume: -1
-  readonly property real shownVolume: localVolume >= 0 ? localVolume : level
+  PendingValue { id: pendingVolume }
+  readonly property real shownVolume: pendingVolume.active
+    ? pendingVolume.value : level
+
+  onEntityChanged: {
+    if (pendingVolume.active
+        && Model.volumeSettled(control.entity, pendingVolume.value)) {
+      pendingVolume.clear()
+    }
+  }
 
   Column {
     id: column
@@ -75,11 +83,12 @@ Item {
       maximum: 1
       step: 0.05
 
-      onMoved: function(value) { control.localVolume = value }
+      onMoved: function(value) { pendingVolume.hold(value) }
       onReleased: function(value) {
-        control.localVolume = -1
+        pendingVolume.commit(value)
         control.hass.setVolume(control.entityId, value)
       }
+      onCanceled: pendingVolume.clear()
     }
   }
 }

@@ -22,6 +22,7 @@ Column {
 
   signal moved(real value)
   signal released(real value)
+  signal canceled()
 
   spacing: Style.spacing.sm
 
@@ -52,16 +53,64 @@ Column {
     }
   }
 
-  PanelSlider {
-    id: slider
+  // The gesture is handled above PanelSlider rather than by it: the panel list
+  // is a Flickable, and a drag that wanders a few pixels off the horizontal is
+  // otherwise taken for a scroll, stealing the grab mid-drag. Only the area
+  // holding the grab can refuse that, and PanelSlider's is private.
+  Item {
     width: parent.width
-    bar: sliderRow.bar
-    minimum: sliderRow.minimum
-    maximum: sliderRow.maximum
-    step: sliderRow.step
-    value: sliderRow.value
+    implicitHeight: slider.implicitHeight
 
-    onMoved: function(value) { sliderRow.moved(value) }
-    onReleased: function(value) { sliderRow.released(value) }
+    PanelSlider {
+      id: slider
+      anchors.fill: parent
+      bar: sliderRow.bar
+      minimum: sliderRow.minimum
+      maximum: sliderRow.maximum
+      step: sliderRow.step
+      value: sliderRow.value
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      preventStealing: true
+
+      function valueAt(x) {
+        var span = Math.max(0.0001, sliderRow.maximum - sliderRow.minimum)
+        var fraction = width > 0 ? Math.max(0, Math.min(1, x / width)) : 0
+        return sliderRow.minimum + fraction * span
+      }
+
+      function track(x) {
+        var next = valueAt(x)
+        slider.liveValue = next
+        sliderRow.moved(next)
+      }
+
+      onPressed: function(mouse) {
+        slider.dragging = true
+        track(mouse.x)
+      }
+      onPositionChanged: function(mouse) {
+        if (slider.dragging) track(mouse.x)
+      }
+      onReleased: function(mouse) {
+        if (!slider.dragging) return
+        slider.dragging = false
+        sliderRow.released(valueAt(mouse.x))
+      }
+      onCanceled: {
+        slider.dragging = false
+        sliderRow.canceled()
+      }
+      onWheel: function(wheel) {
+        var delta = wheel.angleDelta.y > 0 ? sliderRow.step : -sliderRow.step
+        var next = Math.max(sliderRow.minimum,
+                            Math.min(sliderRow.maximum, sliderRow.value + delta))
+        sliderRow.moved(next)
+        sliderRow.released(next)
+      }
+    }
   }
 }

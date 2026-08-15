@@ -25,55 +25,79 @@ Column {
   readonly property var favorites: Model.favoriteColors(
     control.entity, control.hass.savedFavoriteColors[control.entityId])
 
-  // The wheel owns the value while dragging; binding straight to the entity
-  // snaps the knob back under the finger between state updates.
-  property var localColor: null
-  property real localKelvin: -1
+  // What the user picked, shown until the light reports it back. Binding
+  // straight to the entity snaps the knob out from under the cursor.
+  PendingValue { id: pendingColor }
+  PendingValue { id: pendingKelvin }
 
   readonly property real shownHue:
-    localColor ? localColor.hue : (liveColor ? liveColor.hue : 0)
+    pendingColor.active ? pendingColor.value.hue : (liveColor ? liveColor.hue : 0)
   // A light showing white has no hue position of its own, so the knob parks
   // at the centre until something is picked.
   readonly property real shownSaturation:
-    localColor ? localColor.saturation
-               : (whiteActive || !liveColor ? 0 : liveColor.saturation)
+    pendingColor.active ? pendingColor.value.saturation
+                        : (whiteActive || !liveColor ? 0 : liveColor.saturation)
 
   readonly property var kelvinLimits: Model.kelvinRange(control.entity)
 
   // A light rendering a hue reports no colour temperature at all — Home
   // Assistant nulls it while color_mode is anything but color_temp.
   readonly property real liveKelvin: Model.colorTempKelvin(control.entity)
-  readonly property bool hasKelvin: liveKelvin >= 0 || localKelvin >= 0
+  readonly property bool hasKelvin: liveKelvin >= 0 || pendingKelvin.active
 
   readonly property real shownKelvin: {
-    if (localKelvin >= 0) return localKelvin
+    if (pendingKelvin.active) return pendingKelvin.value
     if (liveKelvin >= 0) return liveKelvin
     // Park mid-range rather than at an end, where a slider with no value
     // behind it would read as a real setting of the coldest white.
     return (control.kelvinLimits.min + control.kelvinLimits.max) / 2
   }
 
+  // Which channel the swatches highlight against, ahead of the state change
+  // that will confirm it.
+  readonly property bool shownWhite: {
+    if (pendingKelvin.active && pendingColor.active)
+      return pendingKelvin.pickedAt > pendingColor.pickedAt
+    if (pendingKelvin.active) return true
+    if (pendingColor.active) return false
+    return whiteActive
+  }
+
+  // Hand back to the light once it reports what was picked. A binding would
+  // loop here: clearing changes what it reads.
+  onEntityChanged: {
+    if (pendingColor.active
+        && Model.colorSettled(control.entity, pendingColor.value.hue,
+                              pendingColor.value.saturation)) {
+      pendingColor.clear()
+    }
+    if (pendingKelvin.active
+        && Model.colorTempSettled(control.entity, pendingKelvin.value)) {
+      pendingKelvin.clear()
+    }
+  }
+
   // Wide enough to survive the rounding on the way to the light and back, and
   // narrow enough that two neighbouring favourites never both light up.
   function matchesFavorite(favorite) {
     if (favorite.kind === "colorTemp") {
-      return control.whiteActive
+      return control.shownWhite
         && Math.abs(favorite.kelvin - control.shownKelvin) < 150
     }
-    // Hue is circular: 358 and 2 are four degrees apart, not 356.
-    var gap = Math.abs(favorite.hue - control.shownHue) % 360
-    return !control.whiteActive
-      && Math.min(gap, 360 - gap) < 5
+    return !control.shownWhite
+      && Model.hueGap(favorite.hue, control.shownHue) < 5
       && Math.abs(favorite.saturation - control.shownSaturation) < 8
   }
 
   function applyFavorite(favorite) {
-    control.localColor = null
-    control.localKelvin = -1
     if (favorite.kind === "colorTemp") {
+      pendingColor.clear()
+      pendingKelvin.commit(favorite.kelvin)
       control.hass.setLightColorTemp(control.entityId, favorite.kelvin)
       return
     }
+    pendingKelvin.clear()
+    pendingColor.commit({ hue: favorite.hue, saturation: favorite.saturation })
     control.hass.setLightColor(control.entityId,
                                favorite.hue, favorite.saturation)
   }
@@ -108,13 +132,14 @@ Column {
       saturation: control.shownSaturation
 
       onMoved: function(hue, saturation) {
-        control.localColor = { hue: hue, saturation: saturation }
+        pendingColor.hold({ hue: hue, saturation: saturation })
       }
       onReleased: function(hue, saturation) {
-        control.localColor = null
+        pendingKelvin.clear()
+        pendingColor.commit({ hue: hue, saturation: saturation })
         control.hass.setLightColor(control.entityId, hue, saturation)
       }
-      onCanceled: control.localColor = null
+      onCanceled: pendingColor.clear()
     }
   }
 
@@ -175,10 +200,12 @@ Column {
     maximum: control.kelvinLimits.max
     step: 50
 
-    onMoved: function(value) { control.localKelvin = value }
+    onMoved: function(value) { pendingKelvin.hold(value) }
     onReleased: function(value) {
-      control.localKelvin = -1
+      pendingColor.clear()
+      pendingKelvin.commit(value)
       control.hass.setLightColorTemp(control.entityId, value)
     }
+    onCanceled: pendingKelvin.clear()
   }
 }

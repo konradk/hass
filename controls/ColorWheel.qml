@@ -92,6 +92,9 @@ Item {
     anchors.fill: parent
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
+    // The panel list is a Flickable; without this it takes the grab as soon as
+    // a drag strays off the horizontal and the knob is left behind.
+    preventStealing: true
 
     function distanceFrom(x, y) {
       var dx = x - wheel.width / 2
