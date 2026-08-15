@@ -2,8 +2,10 @@ import QtQuick
 import qs.Commons
 import "../Model.js" as Model
 
-// Brightness for a dimmable light.
-Item {
+// Brightness for a dimmable light, and colour for one that can render it.
+// Each section is built only when the light advertises the capability, so an
+// on/off-only bulb that somehow expands still shows nothing it cannot do.
+Column {
   id: control
 
   required property var hass
@@ -11,7 +13,7 @@ Item {
   property var entity: null
   property QtObject bar: null
 
-  implicitHeight: brightness.implicitHeight
+  readonly property var caps: Model.capabilitiesFor(control.entity)
 
   readonly property real level: {
     var value = entity ? Model.brightnessPercent(entity) : -1
@@ -23,9 +25,12 @@ Item {
   property real localValue: -1
   readonly property real shownValue: localValue >= 0 ? localValue : level
 
+  spacing: Style.spacing.lg
+
   SliderRow {
     id: brightness
     width: parent.width
+    visible: control.caps.brightness
     bar: control.bar
     label: "BRIGHTNESS"
     valueText: Math.round(control.shownValue) + "%"
@@ -41,5 +46,14 @@ Item {
       control.localValue = -1
       control.hass.setBrightness(control.entityId, value)
     }
+  }
+
+  ColorControls {
+    width: parent.width
+    hass: control.hass
+    entityId: control.entityId
+    entity: control.entity
+    caps: control.caps
+    bar: control.bar
   }
 }

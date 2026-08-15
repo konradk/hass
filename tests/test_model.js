@@ -404,6 +404,296 @@ section("attribute redaction", () => {
      Model.redactAttributes(null), {});
 });
 
+section("light colour capability", () => {
+  // A Philips Hue colour strip reports exactly this pair.
+  const strip = entity("light.strip", "on",
+    { supported_color_modes: ["color_temp", "xy"] });
+  eq("an xy light supports colour", Model.supportsColor(strip), true);
+  eq("the same light supports colour temperature",
+     Model.supportsColorTemp(strip), true);
+
+  eq("hs is a colour mode", Model.supportsColor(entity("light.a", "on",
+     { supported_color_modes: ["hs"] })), true);
+  eq("rgbww is a colour mode", Model.supportsColor(entity("light.a", "on",
+     { supported_color_modes: ["rgbww"] })), true);
+
+  // color_temp and white produce white light only. Treating either as colour
+  // would put a hue slider on a tunable-white bulb that cannot act on it.
+  eq("colour temperature alone is not colour",
+     Model.supportsColor(entity("light.a", "on",
+       { supported_color_modes: ["color_temp"] })), false);
+  eq("white alone is not colour", Model.supportsColor(entity("light.a", "on",
+     { supported_color_modes: ["white"] })), false);
+  eq("a dimmable-only light has no colour",
+     Model.supportsColor(entity("light.a", "on",
+       { supported_color_modes: ["brightness"] })), false);
+  eq("colour is a light-only capability",
+     Model.supportsColor(entity("switch.a", "on",
+       { supported_color_modes: ["hs"] })), false);
+
+  // The capability has to come from supported_color_modes, because a colour
+  // light that is off reports no hs_color at all — which is the moment the
+  // picker is wanted.
+  const off = entity("light.strip", "off",
+    { supported_color_modes: ["color_temp", "xy"], hs_color: null });
+  eq("a light that is off still advertises colour",
+     Model.supportsColor(off), true);
+  eq("a light that is off reports no live colour", Model.hsColor(off), null);
+});
+
+section("light colour values", () => {
+  eq("hs_color is read as hue and saturation",
+     Model.hsColor(entity("light.a", "on", { hs_color: [28.5, 100] })),
+     { hue: 28.5, saturation: 100 });
+  eq("out-of-range values are clamped rather than trusted",
+     Model.hsColor(entity("light.a", "on", { hs_color: [400, 140] })),
+     { hue: 360, saturation: 100 });
+  eq("a malformed hs_color is no colour",
+     Model.hsColor(entity("light.a", "on", { hs_color: ["red"] })), null);
+  eq("a missing hs_color is no colour",
+     Model.hsColor(entity("light.a", "on")), null);
+
+  eq("colour temperature mode is detected",
+     Model.isColorTempActive(entity("light.a", "on",
+       { color_mode: "color_temp" })), true);
+  eq("hue mode is not colour temperature mode",
+     Model.isColorTempActive(entity("light.a", "on", { color_mode: "hs" })),
+     false);
+});
+
+section("colour temperature range", () => {
+  eq("declared kelvin limits are used as-is",
+     Model.kelvinRange(entity("light.a", "on",
+       { min_color_temp_kelvin: 2202, max_color_temp_kelvin: 4000 })),
+     { min: 2202, max: 4000 });
+
+  // Pre-2022.11 instances publish mireds only, and the ends swap: the largest
+  // mired value is the warmest light and therefore the lowest kelvin.
+  eq("mireds are converted and the ends swapped",
+     Model.kelvinRange(entity("light.a", "on",
+       { min_mireds: 153, max_mireds: 500 })),
+     { min: 2000, max: 6536 });
+
+  eq("a light with no limits falls back to the Home Assistant defaults",
+     Model.kelvinRange(entity("light.a", "on")), { min: 2000, max: 6535 });
+  eq("a nonsense range falls back rather than inverting the slider",
+     Model.kelvinRange(entity("light.a", "on",
+       { min_color_temp_kelvin: 5000, max_color_temp_kelvin: 2000 })),
+     { min: 2000, max: 6535 });
+
+  eq("kelvin is read directly when published",
+     Model.colorTempKelvin(entity("light.a", "on",
+       { color_temp_kelvin: 2700 })), 2700);
+  eq("mireds are converted to kelvin",
+     Model.colorTempKelvin(entity("light.a", "on", { color_temp: 370 })), 2703);
+  eq("no colour temperature is signalled with -1",
+     Model.colorTempKelvin(entity("light.a", "on")), -1);
+});
+
+section("colour service payloads", () => {
+  eq("a hue and saturation become hs_color",
+     Model.lightColorData(28, 100), { hs_color: [28, 100] });
+
+  // Home Assistant rejects a hue of exactly 360, which is the same colour as 0.
+  eq("360 degrees wraps to 0", Model.lightColorData(360, 80),
+     { hs_color: [0, 80] });
+  // Rounding runs before the wrap, or a hue a hair under 360 rounds up into
+  // the value the wrap exists to avoid. The wheel emits continuous angles.
+  eq("a hue that rounds up to 360 still wraps",
+     Model.lightColorData(359.999, 80), { hs_color: [0, 80] });
+  eq("a negative hue wraps forward", Model.lightColorData(-10, 80),
+     { hs_color: [350, 80] });
+  eq("saturation is clamped", Model.lightColorData(10, 140),
+     { hs_color: [10, 100] });
+  eq("a non-numeric hue produces no call", Model.lightColorData("red", 50),
+     null);
+  eq("a non-finite hue produces no call", Model.lightColorData(Infinity, 50),
+     null);
+
+  const strip = entity("light.strip", "on",
+    { min_color_temp_kelvin: 2202, max_color_temp_kelvin: 4000 });
+  eq("kelvin is clamped into the light's own range",
+     Model.lightColorTempData(strip, 6500), { color_temp_kelvin: 4000 });
+  eq("kelvin below the range is clamped up",
+     Model.lightColorTempData(strip, 1000), { color_temp_kelvin: 2202 });
+  eq("a non-numeric kelvin produces no call",
+     Model.lightColorTempData(strip, "warm"), null);
+});
+
+section("colour conversion", () => {
+  // Anchors from the frontend's own temperature2rgb curve.
+  eq("a warm temperature is orange", Model.temperatureToRgb(2000),
+     [255, 137, 14]);
+  eq("6500K is near white", Model.temperatureToRgb(6500), [255, 254, 250]);
+  eq("above 6600K the blue channel saturates",
+     Model.temperatureToRgb(10000)[2], 255);
+
+  eq("pure red converts to hue 0", Model.rgbToHs([255, 0, 0]),
+     { hue: 0, saturation: 100 });
+  eq("pure green converts to hue 120", Model.rgbToHs([0, 255, 0]),
+     { hue: 120, saturation: 100 });
+  eq("white has no saturation", Model.rgbToHs([255, 255, 255]),
+     { hue: 0, saturation: 0 });
+  eq("black has no saturation", Model.rgbToHs([0, 0, 0]),
+     { hue: 0, saturation: 0 });
+
+  eq("hue 0 renders red", Model.hsToRgb(0, 100), [255, 0, 0]);
+  eq("hue 240 renders blue", Model.hsToRgb(240, 100), [0, 0, 255]);
+  eq("no saturation renders white", Model.hsToRgb(200, 0), [255, 255, 255]);
+
+  // The favourites round-trip through both directions, so they have to agree.
+  const roundTrip = Model.rgbToHs(Model.hsToRgb(210, 60));
+  eq("hue survives a round trip", Math.round(roundTrip.hue), 210);
+  eq("saturation survives a round trip", Math.round(roundTrip.saturation), 60);
+
+  // A white channel lifts the colour without letting it overflow past 255.
+  eq("rgbw folds the white channel in", Model.rgbwToRgb([255, 0, 0, 255]),
+     [255, 128, 128]);
+
+  // rgbww carries a cold and a warm white; their ratio picks a temperature
+  // between the light's limits, which is then folded in like the rgbw white.
+  eq("an all-cold rgbww renders the top of the range",
+     Model.rgbwwToRgb([0, 0, 0, 255, 0], 2000, 6535),
+     Model.temperatureToRgb(6535));
+  eq("an all-warm rgbww renders the bottom of it",
+     Model.rgbwwToRgb([0, 0, 0, 0, 255], 2000, 6535),
+     Model.temperatureToRgb(2000));
+  // Even channels interpolate in mireds, not kelvin, so the midpoint is
+  // 3063K rather than 4267K.
+  eq("a balanced rgbww sits between the two",
+     Model.rgbwwToRgb([0, 0, 0, 255, 255], 2000, 6535),
+     [255, 179, 114]);
+  eq("rgbww with no white channels keeps the colour",
+     Model.rgbwwToRgb([255, 0, 0, 0, 0], 2000, 6535), [255, 0, 0]);
+});
+
+section("favourite colours", () => {
+  // A Philips Hue colour strip: colour and colour temperature.
+  const strip = entity("light.strip", "on", {
+    supported_color_modes: ["color_temp", "xy"],
+    min_color_temp_kelvin: 2000, max_color_temp_kelvin: 6535
+  });
+
+  // With nothing saved, Home Assistant computes four colour temperatures
+  // stepped across the light's own range, then four fixed colours. The panel
+  // has to show the same eight, in the same order, as the app.
+  const defaults = Model.favoriteColors(strip, null);
+  eq("a light with no saved favourites gets eight", defaults.length, 8);
+  eq("the first four are colour temperatures",
+     defaults.slice(0, 4).map((f) => f.kind),
+     ["colorTemp", "colorTemp", "colorTemp", "colorTemp"]);
+  eq("they step across the light's own range",
+     defaults.slice(0, 4).map((f) => f.kelvin), [2000, 3512, 5023, 6535]);
+  eq("the last four are colours",
+     defaults.slice(4).map((f) => f.kind),
+     ["color", "color", "color", "color"]);
+  eq("and are the frontend's fixed picks",
+     defaults.slice(4).map((f) => f.rgb),
+     [[127, 172, 255], [215, 150, 255], [255, 158, 243], [255, 110, 84]]);
+
+  // Without colour temperature the same four whites are sent as colours,
+  // because that is the only channel the light has to render them on.
+  const colorOnly = entity("light.c", "on", { supported_color_modes: ["hs"] });
+  const colorDefaults = Model.favoriteColors(colorOnly, null);
+  eq("a colour-only light still gets eight", colorDefaults.length, 8);
+  eq("none of them are colour temperatures",
+     colorDefaults.every((f) => f.kind === "color"), true);
+
+  // A tunable white gets the temperatures and nothing else — offering a
+  // colour it cannot render would send a call it has to reject.
+  const whiteOnly = entity("light.w", "on",
+    { supported_color_modes: ["color_temp"],
+      min_color_temp_kelvin: 2200, max_color_temp_kelvin: 4000 });
+  const whiteDefaults = Model.favoriteColors(whiteOnly, null);
+  eq("a tunable white gets only temperatures", whiteDefaults.length, 4);
+  eq("bounded by its own range",
+     [whiteDefaults[0].kelvin, whiteDefaults[3].kelvin], [2200, 4000]);
+
+  eq("a non-light has no favourites",
+     Model.favoriteColors(entity("switch.a", "on"), null), []);
+});
+
+section("saved favourite colours", () => {
+  const strip = entity("light.strip", "on", {
+    supported_color_modes: ["color_temp", "xy"],
+    min_color_temp_kelvin: 2000, max_color_temp_kelvin: 6535
+  });
+
+  const saved = Model.favoriteColors(strip, [
+    { color_temp_kelvin: 2700 },
+    { rgb_color: [255, 110, 84] },
+    { hs_color: [120, 100] }
+  ]);
+  eq("saved favourites replace the defaults", saved.length, 3);
+  eq("a saved temperature keeps its kelvin", saved[0].kelvin, 2700);
+  eq("a saved temperature carries a drawable swatch", saved[0].rgb,
+     Model.temperatureToRgb(2700));
+  eq("a saved rgb becomes hue and saturation",
+     [Math.round(saved[1].hue), Math.round(saved[1].saturation)], [9, 67]);
+  eq("a saved hs_color survives as itself",
+     [Math.round(saved[2].hue), Math.round(saved[2].saturation)], [120, 100]);
+
+  // Exactly, not approximately: converting to rgb and back would round a
+  // pale favourite through three bytes and shift its hue several degrees.
+  const pale = Model.favoriteColors(strip, [{ hs_color: [30, 2] }]);
+  eq("a pale saved hs_color keeps its exact hue",
+     [pale[0].hue, pale[0].saturation], [30, 2]);
+  eq("and still draws a swatch", pale[0].rgb, Model.hsToRgb(30, 2));
+
+  // The registry is server-controlled and unbounded, but the Repeater that
+  // draws these is not.
+  const many = [];
+  for (let i = 0; i < 200; i++) many.push({ rgb_color: [0, 0, 255] });
+  eq("an absurd saved list is capped",
+     Model.favoriteColors(strip, many).length, 24);
+
+  // Registry contents are server-controlled, so a malformed entry must be
+  // dropped rather than drawn or sent.
+  const messy = Model.favoriteColors(strip, [
+    { rgb_color: ["red", 0, 0] }, { nonsense: true }, null, "blue",
+    { rgb_color: [0, 0, 255] }
+  ]);
+  eq("malformed favourites are dropped", messy.length, 1);
+  eq("the survivor is the valid one", messy[0].rgb, [0, 0, 255]);
+
+  eq("an empty saved list falls back to the defaults",
+     Model.favoriteColors(strip, []).length, 8);
+
+  // A temperature favourite copied onto a light with no white channel would
+  // produce a call the light must reject.
+  const colorOnly = entity("light.c", "on", { supported_color_modes: ["hs"] });
+  eq("a temperature favourite is dropped on a colour-only light",
+     Model.favoriteColors(colorOnly, [{ color_temp_kelvin: 2700 }]).length, 8);
+
+  const whiteOnly = entity("light.w", "on",
+    { supported_color_modes: ["color_temp"] });
+  eq("a colour favourite is dropped on a tunable white",
+     Model.favoriteColors(whiteOnly, [{ rgb_color: [255, 0, 0] }]).length, 4);
+
+  // Clamping is the model's job, not the light's.
+  const clamped = Model.favoriteColors(strip, [{ color_temp_kelvin: 99000 }]);
+  eq("a saved temperature is clamped into range", clamped[0].kelvin, 6535);
+});
+
+section("colour capabilities and expansion", () => {
+  const strip = Model.capabilitiesFor(entity("light.strip", "on",
+    { supported_color_modes: ["color_temp", "xy"] }));
+  eq("a colour strip reports colour", strip.color, true);
+  eq("a colour strip reports colour temperature", strip.colorTemp, true);
+  eq("a colour strip is expandable", strip.expandable, true);
+
+  const plain = Model.capabilitiesFor(entity("light.a", "on",
+    { supported_color_modes: ["onoff"] }));
+  eq("an on/off light has no colour", plain.color, false);
+  eq("an on/off light has no colour temperature", plain.colorTemp, false);
+  eq("an on/off light is not expandable", plain.expandable, false);
+
+  // Unavailable entities must not offer controls that would send a command.
+  const gone = Model.capabilitiesFor(entity("light.strip", "unavailable",
+    { supported_color_modes: ["hs"] }));
+  eq("an unavailable light offers no colour control", gone.color, false);
+});
+
 console.log();
 if (failures) {
   console.log(`FAILED: ${failures} of ${checks} checks`);
