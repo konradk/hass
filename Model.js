@@ -165,6 +165,348 @@ function brightnessPercent(entity) {
   return Math.min(Math.max(value / 255.0 * 100.0, 0), 100)
 }
 
+// ---------------------------------------------------------- light colour
+
+// Every mode here accepts hs_color on the way in — Home Assistant converts to
+// the one the light actually speaks — so one wheel drives all of them.
+// `color_temp` and `white` produce white light only, and are separate.
+var COLOR_MODES = ["hs", "xy", "rgb", "rgbw", "rgbww"]
+
+// Home Assistant's own fallbacks, for a light that publishes no limits.
+var DEFAULT_MIN_KELVIN = 2000
+var DEFAULT_MAX_KELVIN = 6535
+
+function clampNumber(value, low, high) {
+  return Math.min(Math.max(value, low), high)
+}
+
+function colorModes(entity) {
+  var modes = attrs(entity).supported_color_modes
+  if (!Array.isArray(modes)) return []
+  var out = []
+  for (var i = 0; i < modes.length; i++) {
+    if (typeof modes[i] === "string") out.push(modes[i])
+  }
+  return out
+}
+
+// Capability comes from supported_color_modes, never from a currently non-null
+// hs_color: a colour light that is off reports no colour at all, which is
+// exactly when someone wants the picker.
+function supportsColor(entity) {
+  if (domain(entity) !== "light") return false
+  var modes = colorModes(entity)
+  for (var i = 0; i < modes.length; i++) {
+    if (COLOR_MODES.indexOf(modes[i]) !== -1) return true
+  }
+  return false
+}
+
+function supportsColorTemp(entity) {
+  if (domain(entity) !== "light") return false
+  return colorModes(entity).indexOf("color_temp") !== -1
+}
+
+// { hue: 0-360, saturation: 0-100 }, or null when the light reports no colour.
+// Home Assistant publishes hs_color for every colour light whatever its native
+// mode — including one in colour-temperature mode, where it derives a hue from
+// the temperature — so this one attribute covers xy and rgb lights too.
+function hsColor(entity) {
+  var value = attrs(entity).hs_color
+  if (!Array.isArray(value) || value.length < 2) return null
+  var hue = Number(value[0])
+  var saturation = Number(value[1])
+  if (!isFinite(hue) || !isFinite(saturation)) return null
+  return {
+    hue: clampNumber(hue, 0, 360),
+    saturation: clampNumber(saturation, 0, 100)
+  }
+}
+
+// Instances before 2022.11 publish mireds instead of kelvin. The ends swap in
+// the conversion: the largest mired is the warmest light, so it becomes the
+// *minimum* kelvin.
+function kelvinRange(entity) {
+  var a = attrs(entity)
+  var min = typeof a.min_color_temp_kelvin === "number"
+    ? a.min_color_temp_kelvin
+    : (typeof a.max_mireds === "number" && a.max_mireds > 0
+      ? Math.round(1000000 / a.max_mireds) : DEFAULT_MIN_KELVIN)
+  var max = typeof a.max_color_temp_kelvin === "number"
+    ? a.max_color_temp_kelvin
+    : (typeof a.min_mireds === "number" && a.min_mireds > 0
+      ? Math.round(1000000 / a.min_mireds) : DEFAULT_MAX_KELVIN)
+  if (!isFinite(min) || !isFinite(max) || min >= max) {
+    return { min: DEFAULT_MIN_KELVIN, max: DEFAULT_MAX_KELVIN }
+  }
+  return { min: min, max: max }
+}
+
+function colorTempKelvin(entity) {
+  var a = attrs(entity)
+  if (typeof a.color_temp_kelvin === "number" && isFinite(a.color_temp_kelvin)) {
+    return a.color_temp_kelvin
+  }
+  if (typeof a.color_temp === "number" && a.color_temp > 0) {
+    return Math.round(1000000 / a.color_temp)
+  }
+  return -1
+}
+
+// True while the light renders white from its colour-temperature channel
+// rather than a hue. Only decides which control reads as the live one; both
+// stay usable.
+function isColorTempActive(entity) {
+  return cleaned(attrs(entity).color_mode) === "color_temp"
+}
+
+// Home Assistant treats hue as a half-open range: 360 is rejected, and it is
+// the same colour as 0 anyway. Round before wrapping, or 359.999 rounds up
+// into the value the wrap exists to avoid.
+function lightColorData(hue, saturation) {
+  if (typeof hue !== "number" || !isFinite(hue)) return null
+  if (typeof saturation !== "number" || !isFinite(saturation)) return null
+  var rounded = Math.round(hue * 100) / 100
+  return {
+    hs_color: [
+      ((rounded % 360) + 360) % 360,
+      Math.round(clampNumber(saturation, 0, 100) * 100) / 100
+    ]
+  }
+}
+
+function lightColorTempData(entity, kelvin) {
+  if (typeof kelvin !== "number" || !isFinite(kelvin)) return null
+  var range = kelvinRange(entity)
+  return { color_temp_kelvin: Math.round(clampNumber(kelvin, range.min, range.max)) }
+}
+
+// ------------------------------------------------------- colour conversion
+
+// Ported from the frontend's temperature2rgb: a temperature swatch has to be
+// the colour the app draws, and a second approximation of the curve would not
+// be. rgbToHs/hsToRgb/matchMaxScale/rgbw*ToRgb below come from the same place.
+function temperatureToRgb(kelvin) {
+  var t = clampNumber(kelvin, 1000, 40000) / 100
+  var red = t <= 66
+    ? 255
+    : clampNumber(329.698727446 * Math.pow(t - 60, -0.1332047592), 0, 255)
+  var green = t <= 66
+    ? clampNumber(99.4708025861 * Math.log(t) - 161.1195681661, 0, 255)
+    : clampNumber(288.1221695283 * Math.pow(t - 60, -0.0755148492), 0, 255)
+  var blue = t >= 66
+    ? 255
+    : (t <= 19
+      ? 0
+      : clampNumber(138.5177312231 * Math.log(t - 10) - 305.0447927307, 0, 255))
+  return [Math.round(red), Math.round(green), Math.round(blue)]
+}
+
+function rgbToHs(rgb) {
+  var red = clampNumber(rgb[0], 0, 255) / 255
+  var green = clampNumber(rgb[1], 0, 255) / 255
+  var blue = clampNumber(rgb[2], 0, 255) / 255
+  var high = Math.max(red, green, blue)
+  var low = Math.min(red, green, blue)
+  var delta = high - low
+
+  var hue = 0
+  if (delta > 0) {
+    if (high === red) hue = 60 * (((green - blue) / delta) % 6)
+    else if (high === green) hue = 60 * ((blue - red) / delta + 2)
+    else hue = 60 * ((red - green) / delta + 4)
+  }
+  if (hue < 0) hue += 360
+
+  return {
+    hue: Math.round(hue * 100) / 100,
+    saturation: Math.round((high === 0 ? 0 : delta / high) * 10000) / 100
+  }
+}
+
+function hsToRgb(hue, saturation) {
+  var h = (((hue % 360) + 360) % 360) / 60
+  var s = clampNumber(saturation, 0, 100) / 100
+  var chroma = s
+  var second = chroma * (1 - Math.abs((h % 2) - 1))
+  var rgb = [0, 0, 0]
+  if (h < 1) rgb = [chroma, second, 0]
+  else if (h < 2) rgb = [second, chroma, 0]
+  else if (h < 3) rgb = [0, chroma, second]
+  else if (h < 4) rgb = [0, second, chroma]
+  else if (h < 5) rgb = [second, 0, chroma]
+  else rgb = [chroma, 0, second]
+  var offset = 1 - chroma
+  return [
+    Math.round((rgb[0] + offset) * 255),
+    Math.round((rgb[1] + offset) * 255),
+    Math.round((rgb[2] + offset) * 255)
+  ]
+}
+
+// Scales a converted colour so its brightest channel matches the input's,
+// which is what keeps the two below from overflowing.
+function matchMaxScale(inputs, outputs) {
+  var maxIn = Math.max.apply(null, inputs)
+  var maxOut = Math.max.apply(null, outputs)
+  var factor = maxOut === 0 ? 0 : maxIn / maxOut
+  var scaled = []
+  for (var i = 0; i < outputs.length; i++) {
+    scaled.push(Math.round(outputs[i] * factor))
+  }
+  return scaled
+}
+
+function rgbwToRgb(rgbw) {
+  var white = rgbw[3]
+  return matchMaxScale(rgbw,
+    [rgbw[0] + white, rgbw[1] + white, rgbw[2] + white])
+}
+
+function rgbwwToRgb(rgbww, minKelvin, maxKelvin) {
+  var cold = rgbww[3]
+  var warm = rgbww[4]
+  var maxMireds = 1000000 / minKelvin
+  var minMireds = 1000000 / maxKelvin
+  var ratio = (cold + warm) === 0 ? 0.5 : warm / (cold + warm)
+  var mireds = minMireds + ratio * (maxMireds - minMireds)
+  var white = temperatureToRgb(1000000 / mireds)
+  var level = Math.max(cold, warm) / 255
+  return matchMaxScale(rgbww, [
+    rgbww[0] + white[0] * level,
+    rgbww[1] + white[1] * level,
+    rgbww[2] + white[2] * level
+  ])
+}
+
+// ------------------------------------------------------- favourite colours
+
+// Home Assistant keeps per-light favourites in the entity registry under
+// options.light.favorite_colors, and computes a set for the many lights with
+// none saved. Both are mirrored, so the panel offers the app's swatches
+// rather than a private palette sitting next to one.
+var COLOR_TEMP_COUNT = 4
+var DEFAULT_COLORED_COLORS = [
+  [127, 172, 255],
+  [215, 150, 255],
+  [255, 158, 243],
+  [255, 110, 84]
+]
+
+// The registry is server-controlled and unbounded; the app's own editor stops
+// well short of this.
+var MAX_FAVORITE_COLORS = 24
+
+function numberArray(value, length) {
+  if (!Array.isArray(value) || value.length < length) return null
+  var out = []
+  for (var i = 0; i < length; i++) {
+    var number = Number(value[i])
+    if (!isFinite(number)) return null
+    out.push(number)
+  }
+  return out
+}
+
+// A favourite is normalized into the same hue/saturation or kelvin the wheel
+// and the warmth slider produce, never carried around as a raw registry
+// object, so a saved favourite cannot become an arbitrary service call.
+function hsFavorite(hue, saturation) {
+  return {
+    kind: "color", hue: hue, saturation: saturation, kelvin: -1,
+    rgb: hsToRgb(hue, saturation)
+  }
+}
+
+function colorFavorite(rgb) {
+  var hs = rgbToHs(rgb)
+  return {
+    kind: "color", hue: hs.hue, saturation: hs.saturation, kelvin: -1,
+    rgb: [Math.round(clampNumber(rgb[0], 0, 255)),
+          Math.round(clampNumber(rgb[1], 0, 255)),
+          Math.round(clampNumber(rgb[2], 0, 255))]
+  }
+}
+
+function colorTempFavorite(kelvin) {
+  return {
+    kind: "colorTemp", hue: -1, saturation: -1, kelvin: Math.round(kelvin),
+    rgb: temperatureToRgb(kelvin)
+  }
+}
+
+function parseFavoriteColor(entity, raw) {
+  if (!raw || typeof raw !== "object") return null
+  var range = kelvinRange(entity)
+
+  if (typeof raw.color_temp_kelvin === "number"
+      && isFinite(raw.color_temp_kelvin)) {
+    if (!supportsColorTemp(entity)) return null
+    return colorTempFavorite(
+      clampNumber(raw.color_temp_kelvin, range.min, range.max))
+  }
+  if (!supportsColor(entity)) return null
+
+  // Saved hue and saturation are authoritative; converting them to rgb and
+  // back would round a low-saturation favourite into a visibly different hue.
+  var hs = numberArray(raw.hs_color, 2)
+  if (hs) {
+    return hsFavorite(clampNumber(hs[0], 0, 360), clampNumber(hs[1], 0, 100))
+  }
+  var rgb = numberArray(raw.rgb_color, 3)
+  if (rgb) return colorFavorite(rgb)
+
+  var rgbw = numberArray(raw.rgbw_color, 4)
+  if (rgbw) return colorFavorite(rgbwToRgb(rgbw))
+
+  var rgbww = numberArray(raw.rgbww_color, 5)
+  if (rgbww) return colorFavorite(rgbwwToRgb(rgbww, range.min, range.max))
+
+  return null
+}
+
+// The frontend's computeDefaultFavoriteColors: colour temperatures stepped
+// across the light's own range when it has one, otherwise the same steps
+// rendered as colours, then four fixed picks. The 2000/6500 bounds of the
+// colour-only branch are upstream's literals, not the defaults above.
+function defaultFavoriteColors(entity) {
+  var out = []
+  var hasTemp = supportsColorTemp(entity)
+  var hasColor = supportsColor(entity)
+
+  if (hasTemp) {
+    var range = kelvinRange(entity)
+    var step = (range.max - range.min) / (COLOR_TEMP_COUNT - 1)
+    for (var i = 0; i < COLOR_TEMP_COUNT; i++) {
+      out.push(colorTempFavorite(Math.round(range.min + step * i)))
+    }
+  } else if (hasColor) {
+    var whiteStep = (6500 - 2000) / (COLOR_TEMP_COUNT - 1)
+    for (var w = 0; w < COLOR_TEMP_COUNT; w++) {
+      out.push(colorFavorite(
+        temperatureToRgb(Math.round(2000 + whiteStep * w))))
+    }
+  }
+
+  if (hasColor) {
+    for (var c = 0; c < DEFAULT_COLORED_COLORS.length; c++) {
+      out.push(colorFavorite(DEFAULT_COLORED_COLORS[c]))
+    }
+  }
+  return out
+}
+
+function favoriteColors(entity, saved) {
+  if (!entity || domain(entity) !== "light") return []
+  var out = []
+  var list = Array.isArray(saved) ? saved.slice(0, MAX_FAVORITE_COLORS) : []
+  for (var i = 0; i < list.length; i++) {
+    var parsed = parseFavoriteColor(entity, list[i])
+    if (parsed) out.push(parsed)
+  }
+  return out.length ? out : defaultFavoriteColors(entity)
+}
+
 // ---------------------------------------------------------------- media
 
 function volumeLevel(entity) {
@@ -220,6 +562,8 @@ function capabilitiesFor(entity) {
     lock: available && dom === "lock",
     activate: available && activate,
     brightness: available && supportsBrightness(entity),
+    color: available && supportsColor(entity),
+    colorTemp: available && supportsColorTemp(entity),
     mediaPrevious: false,
     mediaPlayPause: false,
     mediaNext: false,
@@ -263,7 +607,7 @@ function capabilitiesFor(entity) {
       && hasClimateModeOption(entity, "swing_modes")
 
   }
-  result.expandable = result.brightness
+  result.expandable = result.brightness || result.color || result.colorTemp
     || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
     || result.mediaVolume || result.coverOpen || result.coverStop
     || result.coverClose || result.climateTarget || result.climateRange

@@ -240,10 +240,15 @@ def demo_initial_states():
         # one: brightness support is advertised through supported_color_modes,
         # climate carries no unit of its own, and the HVAC mode is the state.
         # A demo that lies about this is how the real instance breaks.
+        # Colour and colour temperature on one light, brightness only on the
+        # kitchen pendant below, so the panel's capability gating is exercised
+        # in both directions without a real bulb.
         entity("light.living_room_lamp", "on", {
             "friendly_name": "Living Room Lamp", "icon": "mdi:lightbulb",
-            "brightness": 180, "color_mode": "brightness",
-            "supported_color_modes": ["brightness"]}),
+            "brightness": 180, "color_mode": "hs",
+            "hs_color": [28.0, 100.0],
+            "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6535,
+            "supported_color_modes": ["color_temp", "hs"]}),
         entity("fan.living_room_ceiling_fan", "on", {
             "friendly_name": "Living Room Ceiling Fan", "icon": "mdi:fan"}),
         entity("climate.living_room_thermostat", "heat", {
@@ -398,6 +403,22 @@ class DemoTransport:
                 pct = max(0.0, min(100.0, float(data["brightness_pct"])))
                 self._set_attrs(entity_id, {
                     "brightness": round(pct / 100.0 * 255.0)})
+            # A real light reports back the mode it ended up in, and nulls
+            # color_temp_kelvin whenever that mode is not color_temp — which
+            # is how the panel knows warmth has no live value to show. It
+            # keeps hs_color either way, deriving one from the temperature.
+            if domain == "light":
+                color = data.get("hs_color")
+                if isinstance(color, list) and len(color) >= 2:
+                    self._set_attrs(entity_id, {
+                        "hs_color": [float(color[0]), float(color[1])],
+                        "color_temp_kelvin": None,
+                        "color_mode": "hs"})
+                kelvin = data.get("color_temp_kelvin")
+                if isinstance(kelvin, (int, float)):
+                    self._set_attrs(entity_id, {
+                        "color_temp_kelvin": int(kelvin),
+                        "color_mode": "color_temp"})
         elif service == "turn_off" and domain in (
                 "light", "switch", "fan", "input_boolean", "humidifier"):
             self._set_state(entity_id, "off")

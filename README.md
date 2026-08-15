@@ -28,7 +28,7 @@ refreshes, `esc` closes, and `tab` moves to the next bar panel.
 
 | Domain | Control |
 |---|---|
-| `light` | On/off, plus a brightness slider when the light is dimmable |
+| `light` | On/off, plus a brightness slider when the light is dimmable, colour swatches with hue and saturation when it renders colour, and a warmth slider when it does colour temperature |
 | `switch`, `fan`, `input_boolean`, `humidifier` | On/off |
 | `lock` | Lock/unlock switch |
 | `scene`, `script` | Activate button |

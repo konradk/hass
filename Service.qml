@@ -534,6 +534,26 @@ QtObject {
                      { brightness_pct: Math.round(percent) }, root.callTag(entityId))
   }
 
+  function setLightColor(entityId, hue, saturation) {
+    if (!root.capabilities(entityId).color) {
+      return root.rejectAction("This light does not support colour control.")
+    }
+    var data = Model.lightColorData(hue, saturation)
+    if (!data) return root.rejectAction("Invalid colour value.")
+    return root.callService("light", "turn_on", entityId, data,
+                            root.callTag(entityId))
+  }
+
+  function setLightColorTemp(entityId, kelvin) {
+    if (!root.capabilities(entityId).colorTemp) {
+      return root.rejectAction("This light does not support colour temperature.")
+    }
+    var data = Model.lightColorTempData(root.states[entityId], kelvin)
+    if (!data) return root.rejectAction("Invalid colour temperature.")
+    return root.callService("light", "turn_on", entityId, data,
+                            root.callTag(entityId))
+  }
+
   function setVolume(entityId, level) {
     if (!root.capabilities(entityId).mediaVolume) {
       return root.rejectAction("This media player does not support volume control.")
@@ -792,8 +812,14 @@ QtObject {
       event.areas, event.entities, event.devices)
     root.areaNames = projection.areaNames
     root.entityArea = projection.entityArea
+    root.savedFavoriteColors = projection.favoriteColors
     root.rebuildRows()
   }
+
+  // entity_id -> the light's saved favourite colours, straight from the
+  // registry. Absent for a light the user has never customized, which is when
+  // Model falls back to the defaults the Home Assistant app computes.
+  property var savedFavoriteColors: ({})
 
   // ------------------------------------------------------------ rows
 

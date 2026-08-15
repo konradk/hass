@@ -255,7 +255,14 @@ class FakeHA:
                              "result": [{"area_id": "a1", "name": "Area One"}]})
         elif kind == "config/entity_registry/list":
             send_json(conn, {"id": msg_id, "type": "result", "success": True,
-                             "result": [{"entity_id": "light.test", "device_id": "d1"}]})
+                             "result": [{
+                                 "entity_id": "light.test", "device_id": "d1",
+                                 # Saved favourite colours ride along in the
+                                 # registry entry's options, which is the only
+                                 # place Home Assistant publishes them.
+                                 "options": {"light": {"favorite_colors": [
+                                     {"color_temp_kelvin": 2700},
+                                     {"rgb_color": [255, 110, 84]}]}}}]})
         elif kind == "config/device_registry/list":
             send_json(conn, {"id": msg_id, "type": "result", "success": True,
                              "result": [{"id": "d1", "area_id": "a1"}]})
