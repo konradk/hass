@@ -116,6 +116,10 @@ def main():
     check("domain actions validate entity capabilities",
           service.count("root.capabilities(entityId)") >= 7
           and "Model.capabilitiesFor(entity)" in service)
+    hvac_mode = function_block("setClimateHvacMode")
+    check("climate HVAC mode calls are capability-validated and typed",
+          "Model.climateHvacModeData" in hvac_mode
+          and 'root.callService("climate", "set_hvac_mode"' in hvac_mode)
     fan_mode = function_block("setClimateFanMode")
     check("climate fan mode calls are capability-validated and typed",
           "Model.climateFanModeData" in fan_mode

@@ -31,6 +31,8 @@ Item {
     ? Model.temperatureRange(entity, instanceUnit) : ({ min: 5, max: 35 })
   readonly property var capabilities: Model.capabilitiesFor(entity)
   readonly property bool ranged: capabilities.climateRange
+  readonly property var hvacModes: entity ? Model.climateHvacModes(entity) : []
+  readonly property string hvacMode: entity ? Model.climateHvacMode(entity) : ""
   readonly property var fanModes: entity ? Model.climateFanModes(entity) : []
   readonly property string fanMode: entity ? Model.climateFanMode(entity) : ""
 
@@ -83,6 +85,50 @@ Item {
     id: column
     width: parent.width
     spacing: Style.spacing.xl
+
+    Column {
+      visible: control.capabilities.climateHvacMode
+      width: parent.width
+      spacing: Style.spacing.sm
+
+      Text {
+        textFormat: Text.PlainText
+        text: "MODE"
+        color: control.fg
+        font.family: control.family
+        font.pixelSize: Style.font.caption
+        font.weight: Font.Medium
+      }
+
+      // HVAC modes are integration-defined. Keep the selector horizontal so
+      // every advertised mode remains reachable in a narrow panel.
+      ScrollView {
+        width: parent.width
+        implicitHeight: hvacModeGroup.implicitHeight
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+
+        ButtonGroup {
+          id: hvacModeGroup
+          focusable: false
+          foreground: control.fg
+          fontFamily: control.family
+          fontSize: Style.font.caption
+          options: control.hvacModes.map(function(mode) {
+            return { value: mode, label: Model.capitalize(mode) }
+          })
+          value: control.hvacMode
+          onChanged: function(mode) {
+            // Incoming state is authoritative. Only a different user choice
+            // needs the typed service call.
+            if (mode !== control.hvacMode) {
+              control.hass.setClimateHvacMode(control.entityId, mode)
+            }
+          }
+        }
+      }
+    }
 
     // ---------- single setpoint ----------
     Column {

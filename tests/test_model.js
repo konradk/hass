@@ -189,6 +189,22 @@ section("temperature", () => {
     min_temp: 10, max_temp: 30
   });
 
+  const hvacEntity = entity("climate.a", "cool", {
+    hvac_modes: ["off", "heat", "cool", "dry", "fan_only", "cool", "", 1]
+  });
+  eq("advertised climate HVAC modes are preserved and cleaned",
+     Model.climateHvacModes(hvacEntity),
+     ["off", "heat", "cool", "dry", "fan_only"]);
+  eq("the HVAC mode is the climate state", Model.climateHvacMode(hvacEntity), "cool");
+  eq("a climate HVAC mode needs advertised options, not a feature bit",
+     Model.capabilitiesFor(hvacEntity).climateHvacMode, true);
+  eq("the selected advertised HVAC mode maps to the typed service payload",
+     Model.climateHvacModeData(hvacEntity, "dry"), { hvac_mode: "dry" });
+  eq("an undeclared HVAC mode is rejected",
+     Model.climateHvacModeData(hvacEntity, "turbo"), {});
+  eq("HVAC mode without advertised options is rejected",
+     Model.climateHvacModeData(entity("climate.a", "cool"), "heat"), {});
+
   const fanEntity = entity("climate.a", "cool", {
     supported_features: 8, fan_mode: "medium",
     fan_modes: ["auto", "low", "medium", "high"]
@@ -285,6 +301,9 @@ section("control classification", () => {
        { supported_features: 1, temperature: 22 })), true);
   eq("climate without a target control does not expand",
      Model.isExpandable(entity("climate.a", "heat")), false);
+  eq("climate with advertised HVAC modes expands",
+     Model.isExpandable(entity("climate.a", "heat",
+       { hvac_modes: ["off", "heat", "cool"] })), true);
   eq("cover with open support expands",
      Model.isExpandable(entity("cover.a", "open", { supported_features: 1 })), true);
   eq("cover without advertised actions does not expand",

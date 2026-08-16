@@ -654,6 +654,16 @@ def test_demo_needs_no_server():
             and e["entity"]["state"] == "heat")
         check("turns on demo climate", climate_on is not None, climate_on)
 
+        bridge.send({"op": "call_service", "domain": "climate", "service": "set_hvac_mode",
+                     "entity_id": climate_id, "data": {"hvac_mode": "cool"},
+                     "tag": "demo-climate-hvac"})
+        hvac_mode = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == climate_id
+            and e["entity"]["state"] == "cool")
+        check("sets the advertised demo HVAC mode", hvac_mode is not None, hvac_mode)
+
+
         bridge.send({"op": "call_service", "domain": "climate", "service": "set_fan_mode",
                      "entity_id": climate_id, "data": {"fan_mode": "high"},
                      "tag": "demo-climate-fan"})

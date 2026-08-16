@@ -227,6 +227,7 @@ function capabilitiesFor(entity) {
     coverClose: false,
     climateTarget: false,
     climateRange: false,
+    climateHvacMode: false,
     climateFanMode: false,
     expandable: false,
     reserveExpandSlot: false
@@ -249,6 +250,7 @@ function capabilitiesFor(entity) {
       && typeof a.target_temp_high === "number"
     result.climateTarget = hasFeature(bits, CLIMATE_TARGET_TEMPERATURE)
       && typeof a.temperature === "number"
+    result.climateHvacMode = climateHvacModes(entity).length > 0
     result.climateFanMode = hasFeature(bits, CLIMATE_FAN_MODE)
       && climateFanModes(entity).length > 0
 
@@ -257,7 +259,7 @@ function capabilitiesFor(entity) {
     || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
     || result.mediaVolume || result.coverOpen || result.coverStop
     || result.coverClose || result.climateTarget || result.climateRange
-    || result.climateFanMode
+    || result.climateHvacMode || result.climateFanMode
   // Climate integrations commonly clear the live target while the device is
   // off. Keep the row geometry stable without pretending there is a target
   // value to edit: the chevron remains hidden/disabled until controls are
@@ -346,6 +348,30 @@ function climateTemperatureData(entity, target, low, high, unitFallback) {
     data.target_temp_high = Math.max(clampedLow, clampedHigh)
   }
   return data
+}
+
+// HVAC mode is the climate entity state. Unlike optional climate controls,
+// Home Assistant does not assign it a supported-feature bit; the advertised
+// `hvac_modes` list is the capability contract for climate.set_hvac_mode.
+function climateHvacModes(entity) {
+  var declared = attrs(entity).hvac_modes
+  if (!Array.isArray(declared)) return []
+  var modes = []
+  for (var i = 0; i < declared.length; i++) {
+    if (typeof declared[i] !== "string" || !declared[i].trim()) continue
+    if (modes.indexOf(declared[i]) === -1) modes.push(declared[i])
+  }
+  return modes
+}
+
+function climateHvacMode(entity) {
+  return stateOf(entity)
+}
+
+function climateHvacModeData(entity, mode) {
+  var caps = capabilitiesFor(entity)
+  if (!caps.climateHvacMode || typeof mode !== "string") return {}
+  return climateHvacModes(entity).indexOf(mode) === -1 ? {} : { hvac_mode: mode }
 }
 
 // Climate integrations declare every permitted fan-mode token. Preserve tokens
