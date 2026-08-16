@@ -116,6 +116,10 @@ def main():
     check("domain actions validate entity capabilities",
           service.count("root.capabilities(entityId)") >= 7
           and "Model.capabilitiesFor(entity)" in service)
+    fan_mode = function_block("setClimateFanMode")
+    check("climate fan mode calls are capability-validated and typed",
+          "Model.climateFanModeData" in fan_mode
+          and 'root.callService("climate", "set_fan_mode"' in fan_mode)
     check("selected tab persistence is debounced",
           "selectedTabSaveDebounce.restart()" in service)
 

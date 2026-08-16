@@ -187,6 +187,7 @@ var COVER_STOP = 8
 
 var CLIMATE_TARGET_TEMPERATURE = 1
 var CLIMATE_TARGET_TEMPERATURE_RANGE = 2
+var CLIMATE_FAN_MODE = 8
 var CLIMATE_TURN_OFF = 128
 var CLIMATE_TURN_ON = 256
 
@@ -226,6 +227,7 @@ function capabilitiesFor(entity) {
     coverClose: false,
     climateTarget: false,
     climateRange: false,
+    climateFanMode: false,
     expandable: false,
     reserveExpandSlot: false
   }
@@ -247,12 +249,15 @@ function capabilitiesFor(entity) {
       && typeof a.target_temp_high === "number"
     result.climateTarget = hasFeature(bits, CLIMATE_TARGET_TEMPERATURE)
       && typeof a.temperature === "number"
-  }
+    result.climateFanMode = hasFeature(bits, CLIMATE_FAN_MODE)
+      && climateFanModes(entity).length > 0
 
+  }
   result.expandable = result.brightness
     || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
     || result.mediaVolume || result.coverOpen || result.coverStop
     || result.coverClose || result.climateTarget || result.climateRange
+    || result.climateFanMode
   // Climate integrations commonly clear the live target while the device is
   // off. Keep the row geometry stable without pretending there is a target
   // value to edit: the chevron remains hidden/disabled until controls are
@@ -342,6 +347,31 @@ function climateTemperatureData(entity, target, low, high, unitFallback) {
   }
   return data
 }
+
+// Climate integrations declare every permitted fan-mode token. Preserve tokens
+// exactly because Home Assistant expects the selected value verbatim.
+function climateFanModes(entity) {
+  var declared = attrs(entity).fan_modes
+  if (!Array.isArray(declared)) return []
+  var modes = []
+  for (var i = 0; i < declared.length; i++) {
+    if (typeof declared[i] !== "string" || !declared[i].trim()) continue
+    if (modes.indexOf(declared[i]) === -1) modes.push(declared[i])
+  }
+  return modes
+}
+
+function climateFanMode(entity) {
+  var mode = attrs(entity).fan_mode
+  return typeof mode === "string" ? mode : ""
+}
+
+function climateFanModeData(entity, mode) {
+  var caps = capabilitiesFor(entity)
+  if (!caps.climateFanMode || typeof mode !== "string") return {}
+  return climateFanModes(entity).indexOf(mode) === -1 ? {} : { fan_mode: mode }
+}
+
 
 // ---------------------------------------------------------------- icons
 

@@ -188,6 +188,24 @@ section("temperature", () => {
     supported_features: 2, target_temp_low: 18, target_temp_high: 24,
     min_temp: 10, max_temp: 30
   });
+
+  const fanEntity = entity("climate.a", "cool", {
+    supported_features: 8, fan_mode: "medium",
+    fan_modes: ["auto", "low", "medium", "high"]
+  });
+  eq("advertised climate fan modes are preserved",
+     Model.climateFanModes(fanEntity), ["auto", "low", "medium", "high"]);
+  eq("a climate fan mode is supported only with its feature and options",
+     Model.capabilitiesFor(fanEntity).climateFanMode, true);
+  eq("the selected advertised fan mode maps to the typed service payload",
+     Model.climateFanModeData(fanEntity, "high"), { fan_mode: "high" });
+  eq("an undeclared fan mode is rejected",
+     Model.climateFanModeData(fanEntity, "turbo"), {});
+  eq("fan options without the advertised feature are rejected",
+     Model.climateFanModeData(entity("climate.a", "cool", {
+       fan_modes: ["auto", "high"]
+     }), "high"), {});
+
   eq("crossed target bounds are normalized",
      Model.climateTemperatureData(rangeEntity, undefined, 27, 16, "°C"),
      { target_temp_low: 16, target_temp_high: 27 });

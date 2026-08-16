@@ -32,7 +32,7 @@ settings, `r` refreshes, `esc` closes, `tab` moves to the next bar panel.
 | `scene`, `script` | Activate button |
 | `media_player` | Previous / play-pause / next, volume slider |
 | `cover` | Open / stop / close |
-| `climate` | On/off when advertised, plus a target temperature or low/high band |
+| `climate` | On/off when advertised, plus a target temperature or low/high band and fan-mode selection when advertised |
 | `sensor`, `binary_sensor`, everything else | State display only |
 
 Cameras not yet.

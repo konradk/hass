@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import qs.Ui
 import qs.Commons
 import "../Model.js" as Model
@@ -30,6 +31,8 @@ Item {
     ? Model.temperatureRange(entity, instanceUnit) : ({ min: 5, max: 35 })
   readonly property var capabilities: Model.capabilitiesFor(entity)
   readonly property bool ranged: capabilities.climateRange
+  readonly property var fanModes: entity ? Model.climateFanModes(entity) : []
+  readonly property string fanMode: entity ? Model.climateFanMode(entity) : ""
 
   function attr(key, fallback) {
     if (!entity || !entity.attributes) return fallback
@@ -154,6 +157,50 @@ Item {
 
       onMoved: function(value) { control.localHigh = value }
       onReleased: function(value) { control.commitRange(false, value) }
+    }
+
+    Column {
+      visible: control.capabilities.climateFanMode
+      width: parent.width
+      spacing: Style.spacing.sm
+
+      Text {
+        textFormat: Text.PlainText
+        text: "FAN"
+        color: control.fg
+        font.family: control.family
+        font.pixelSize: Style.font.caption
+        font.weight: Font.Medium
+      }
+
+      // ButtonGroup is a non-wrapping row. Keep every integration-provided
+      // mode reachable instead of letting a long list escape the panel.
+      ScrollView {
+        width: parent.width
+        implicitHeight: fanModeGroup.implicitHeight
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+
+        ButtonGroup {
+          id: fanModeGroup
+          focusable: false
+          foreground: control.fg
+          fontFamily: control.family
+          fontSize: Style.font.caption
+          options: control.fanModes.map(function(mode) {
+            return { value: mode, label: Model.capitalize(mode) }
+          })
+          value: control.fanMode
+          onChanged: function(mode) {
+            // A state update also changes value. It is already authoritative,
+            // so only dispatch a user selection that differs from that state.
+            if (mode !== control.fanMode) {
+              control.hass.setClimateFanMode(control.entityId, mode)
+            }
+          }
+        }
+      }
     }
   }
 }

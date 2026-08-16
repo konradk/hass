@@ -621,6 +621,16 @@ QtObject {
                      root.callTag(entityId))
   }
 
+  function setClimateFanMode(entityId, mode) {
+    var data = Model.climateFanModeData(root.states[entityId], mode)
+    if (Object.keys(data).length === 0) {
+      return root.rejectAction("This climate entity does not report a controllable fan mode.")
+    }
+    return root.callService("climate", "set_fan_mode", entityId, data,
+                            root.callTag(entityId))
+  }
+
+
   function refresh() {
     root.send({ op: "refresh" })
   }
