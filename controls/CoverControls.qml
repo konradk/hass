@@ -3,11 +3,13 @@ import qs.Ui
 import qs.Commons
 import "../Model.js" as Model
 
-// Open / Close / Stop for a cover.
+// Open / Close / Stop for a cover. Sits inline in EntityRow's control slot
+// (see there) rather than behind the expand chevron other domains use — a
+// Jalousie is not something anyone wants to tap twice to move.
 Item {
   id: control
 
-  required property var hass
+  required property var service
   required property string entityId
   property var entity: null
   property QtObject bar: null
@@ -16,6 +18,7 @@ Item {
   readonly property string family: bar ? bar.fontFamily : Style.font.family
   readonly property var capabilities: Model.capabilitiesFor(entity)
 
+  implicitWidth: row.implicitWidth
   implicitHeight: row.implicitHeight
 
   Row {
@@ -28,7 +31,7 @@ Item {
       tooltipText: "Open"
       foreground: control.fg
       fontFamily: control.family
-      onClicked: control.hass.coverAction(control.entityId, "open_cover")
+      onClicked: control.service.coverAction(control.entityId, "open_cover")
     }
 
     PanelActionButton {
@@ -37,7 +40,7 @@ Item {
       tooltipText: "Stop"
       foreground: control.fg
       fontFamily: control.family
-      onClicked: control.hass.coverAction(control.entityId, "stop_cover")
+      onClicked: control.service.coverAction(control.entityId, "stop_cover")
     }
 
     PanelActionButton {
@@ -46,7 +49,7 @@ Item {
       tooltipText: "Close"
       foreground: control.fg
       fontFamily: control.family
-      onClicked: control.hass.coverAction(control.entityId, "close_cover")
+      onClicked: control.service.coverAction(control.entityId, "close_cover")
     }
   }
 }

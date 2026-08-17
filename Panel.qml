@@ -9,15 +9,15 @@ import "Model.js" as Model
 // the service owns the devices and the connection.
 Panel {
   id: root
-  moduleName: "hass"
-  ipcTarget: "hass"
+  moduleName: "loxone"
+  ipcTarget: "loxone"
   // We own the target's single IpcHandler, so the methods below can sit
   // alongside the base open/close/toggle.
   manageIpc: false
 
-  readonly property var hass: bar && bar.shell ? bar.shell.serviceFor("hass") : null
-  readonly property bool serviceReady: hass !== null
-  readonly property string phase: serviceReady ? hass.phase : "idle"
+  readonly property var loxone: bar && bar.shell ? bar.shell.serviceFor("loxone") : null
+  readonly property bool serviceReady: loxone !== null
+  readonly property string phase: serviceReady ? loxone.phase : "idle"
 
   property string expandedEntityId: ""
 
@@ -26,14 +26,23 @@ Panel {
   property int cursorIndex: 0
   property bool cursorActive: false
 
-  readonly property int rowCount: serviceReady ? hass.rows.count : 0
-  readonly property bool hasDevices: serviceReady && hass.hasDevices
-  readonly property var tabs: serviceReady ? hass.tabs : []
+  readonly property int rowCount: serviceReady ? loxone.rows.count : 0
+  readonly property bool hasDevices: serviceReady && loxone.hasDevices
+  readonly property var tabs: serviceReady ? loxone.tabs : []
 
-  onOpenedChanged: if (!opened) {
-    expandedEntityId = ""
-    cursorActive = false
-    cursorIndex = 0
+  onOpenedChanged: {
+    // A camera stream costs the camera something to serve for as long as
+    // it's being pulled — only worth it while this popover (or Settings'
+    // Camera tab) is actually showing it.
+    if (serviceReady) {
+      if (opened) loxone.registerCameraViewer()
+      else loxone.unregisterCameraViewer()
+    }
+    if (!opened) {
+      expandedEntityId = ""
+      cursorActive = false
+      cursorIndex = 0
+    }
   }
 
   function moveCursor(delta) {
@@ -45,10 +54,10 @@ Panel {
     if (!serviceReady || tabs.length < 2) return
     var current = 0
     for (var i = 0; i < tabs.length; i++) {
-      if (tabs[i].id === hass.effectiveTab) { current = i; break }
+      if (tabs[i].id === loxone.effectiveTab) { current = i; break }
     }
     var next = (current + delta + tabs.length) % tabs.length
-    hass.setActiveTab(tabs[next].id)
+    loxone.setActiveTab(tabs[next].id)
     cursorIndex = 0
     expandedEntityId = ""
   }
@@ -64,12 +73,20 @@ Panel {
     if (item) item.activate()
   }
 
+  // Already connected, so the useful landing spot is the device picker, not
+  // a connection form with nothing new to fill in. Still connection first
+  // for anyone who isn't set up yet — that's the only thing to do there.
+  function defaultSettingsTab() {
+    return (serviceReady && loxone.configured && loxone.phase === "connected")
+      ? "entities" : "connection"
+  }
+
   // A separate plugin surface, so it goes through the shell. The popup closes
   // first because the overlay takes exclusive keyboard focus.
   function openSettings(tab) {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     close()
-    bar.shell.summon("hass", JSON.stringify({ tab: tab || "connection" }))
+    bar.shell.summon("loxone", JSON.stringify({ tab: tab || root.defaultSettingsTab() }))
   }
 
   function expandCursor() {
@@ -97,11 +114,11 @@ Panel {
   // would duplicate it and truncate at hero width.
   readonly property string heroMeta: {
     if (!serviceReady) return "Service unavailable"
-    if (!hass.configured) return "Not connected"
+    if (!loxone.configured) return "Not connected"
     switch (phase) {
     case "connected":
-      return (hass.demoMode ? "Demo · " : "") + hass.activitySummary
-    case "connecting": return hass.lastError ? "Retrying" : "Connecting…"
+      return (loxone.demoMode ? "Demo · " : "") + loxone.activitySummary
+    case "connecting": return loxone.lastError ? "Retrying" : "Connecting…"
     case "error": return "Disconnected"
     default: return "Idle"
     }
@@ -111,7 +128,7 @@ Panel {
   implicitHeight: button.implicitHeight
 
   IpcHandler {
-    target: "hass"
+    target: "loxone"
 
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -121,39 +138,39 @@ Panel {
 
     function status(): string {
       if (!root.serviceReady) return "service: UNREACHABLE"
-      return "phase=" + root.hass.phase
-        + " configured=" + root.hass.configured
-        + " demo=" + root.hass.demoMode
-        + " entities=" + Object.keys(root.hass.states).length
-        + " rows=" + root.hass.rows.count
-        + (root.hass.lastError ? " error=" + root.hass.lastError : "")
+      return "phase=" + root.loxone.phase
+        + " configured=" + root.loxone.configured
+        + " demo=" + root.loxone.demoMode
+        + " entities=" + Object.keys(root.loxone.states).length
+        + " rows=" + root.loxone.rows.count
+        + (root.loxone.lastError ? " error=" + root.loxone.lastError : "")
     }
 
     function refresh(): void {
-      if (root.serviceReady) root.hass.refresh()
+      if (root.serviceReady) root.loxone.refresh()
     }
 
-    //   bind = SUPER, L, exec, omarchy-shell hass toggleEntity light.desk
-    // Goes through the row's own primary action, so a lock locks and a scene
-    // activates rather than being reported as not toggleable.
+    //   bind = SUPER, L, exec, omarchy-shell loxone toggleEntity light.desk
+    // Goes through the row's own primary action, so a lock locks and a
+    // pushbutton fires rather than being reported as not toggleable.
     function toggleEntity(entityId: string): string {
       if (!root.serviceReady) return "service unavailable"
-      if (!root.hass.entityFor(entityId)) return "unknown entity " + entityId
-      return root.hass.activateEntity(entityId)
-        ? "ok" : (root.hass.lastError || "entity isn't toggleable")
+      if (!root.loxone.entityFor(entityId)) return "unknown entity " + entityId
+      return root.loxone.activateEntity(entityId)
+        ? "ok" : (root.loxone.lastError || "entity isn't toggleable")
     }
 
     function activate(entityId: string): string {
       if (!root.serviceReady) return "service unavailable"
-      if (!root.hass.entityFor(entityId)) return "unknown entity " + entityId
-      return root.hass.activateScene(entityId)
-        ? "ok" : (root.hass.lastError || "entity isn't activatable")
+      if (!root.loxone.entityFor(entityId)) return "unknown entity " + entityId
+      return root.loxone.activateScene(entityId)
+        ? "ok" : (root.loxone.lastError || "entity isn't activatable")
     }
 
-    //   bind = SUPER, T, exec, omarchy-shell hass expand climate.hallway
+    //   bind = SUPER, T, exec, omarchy-shell loxone expand climate.hallway
     function expand(entityId: string): string {
       if (!root.serviceReady) return "service unavailable"
-      var entity = root.hass.entityFor(entityId)
+      var entity = root.loxone.entityFor(entityId)
       if (!entity) return "unknown entity " + entityId
       if (!Model.isExpandable(entity)) return "entity has no expandable controls"
       root.expandedEntityId = entityId
@@ -163,10 +180,10 @@ Panel {
 
     function favorite(entityId: string): string {
       if (!root.serviceReady) return "service unavailable"
-      if (!root.hass.entityFor(entityId)) return "unknown entity " + entityId
+      if (!root.loxone.entityFor(entityId)) return "unknown entity " + entityId
       // Read before the write: the new state lands only after applyConfig.
-      var was = root.hass.isFavorite(entityId)
-      root.hass.toggleFavorite(entityId)
+      var was = root.loxone.isFavorite(entityId)
+      root.loxone.toggleFavorite(entityId)
       return was ? "removed" : "added"
     }
 
@@ -175,13 +192,11 @@ Panel {
     function settings(): void { root.openSettings("connection") }
     function devices(): void { root.openSettings("entities") }
 
-    // Attributes are redacted, not dumped whole. A camera carries a live
-    // `access_token`, a device_tracker carries GPS coordinates, and
-    // `entity_picture` is a signed URL — this output is what people paste
-    // into bug reports, so it must not be the easy way to leak any of them.
+    // Attributes are redacted, not dumped whole — see Model.redactAttributes.
+    // This output is what people paste into bug reports.
     function entityState(entityId: string): string {
       if (!root.serviceReady) return "service unavailable"
-      var entity = root.hass.entityFor(entityId)
+      var entity = root.loxone.entityFor(entityId)
       if (!entity) return "unknown entity " + entityId
       return entity.state + " " + JSON.stringify(Model.redactAttributes(entity))
     }
@@ -222,9 +237,9 @@ Panel {
       onActivateRequested: if (root.cursorActive) root.activateCursor()
       onTextKey: function(key) {
         var lower = String(key).toLowerCase()
-        if (lower === "r" && root.serviceReady) root.hass.refresh()
+        if (lower === "r" && root.serviceReady) root.loxone.refresh()
         else if (lower === "e" && root.cursorActive) root.expandCursor()
-        else if (lower === "s") root.openSettings("connection")
+        else if (lower === "s") root.openSettings()
       }
 
       Column {
@@ -235,7 +250,7 @@ Panel {
         // ---------- hero: mark · title · status ----------
         PanelHero {
           width: parent.width
-          title: "Home Assistant"
+          title: "Loxone"
           meta: root.heroMeta
           foreground: root.fg
           fontFamily: root.family
@@ -255,7 +270,7 @@ Panel {
               tooltipText: "Settings"
               foreground: Qt.darker(root.fg, 1.4)
               fontFamily: root.family
-              onClicked: root.openSettings("connection")
+              onClicked: root.openSettings()
             }
           }
         }
@@ -283,10 +298,10 @@ Panel {
           options: root.tabs.map(function(tab) {
             return { value: tab.id, label: tab.title }
           })
-          value: root.serviceReady ? root.hass.effectiveTab : "favorites"
+          value: root.serviceReady ? root.loxone.effectiveTab : "favorites"
           onChanged: function(value) {
             if (!root.serviceReady) return
-            root.hass.setActiveTab(value)
+            root.loxone.setActiveTab(value)
             root.cursorIndex = 0
             root.expandedEntityId = ""
           }
@@ -305,15 +320,15 @@ Panel {
         // ---------- body ----------
         Column {
           width: parent.width
-          visible: !root.serviceReady || !root.hass.configured
+          visible: !root.serviceReady || !root.loxone.configured
           spacing: Style.spacing.xl
 
           Text {
             textFormat: Text.PlainText
             width: parent.width
             text: !root.serviceReady
-              ? "The Home Assistant service did not start."
-              : "Connect to your Home Assistant, or try the demo house first."
+              ? "The Loxone service did not start."
+              : "Connect to your Miniserver, or try the demo house first."
             wrapMode: Text.WordWrap
             color: root.dim
             font.family: root.family
@@ -334,7 +349,7 @@ Panel {
         // column of nameless "Unavailable" rows and no way out.
         Column {
           width: parent.width
-          visible: root.serviceReady && root.hass.configured && !root.hasDevices
+          visible: root.serviceReady && root.loxone.configured && !root.hasDevices
           spacing: Style.spacing.xl
 
           Text {
@@ -347,8 +362,8 @@ Panel {
             text: {
               if (root.phase !== "connecting" && root.phase !== "error")
                 return "Not connected."
-              var reason = root.hass.lastError || "Cannot reach Home Assistant."
-              return root.hass.lastErrorKind === "credential"
+              var reason = root.loxone.lastError || "Cannot reach the Miniserver."
+              return root.loxone.lastErrorKind === "credential"
                 ? reason + " Open settings to connect."
                 : reason
             }
@@ -375,14 +390,14 @@ Panel {
               text: "Retry"
               foreground: root.fg
               fontFamily: root.family
-              onClicked: root.hass.retryConnection()
+              onClicked: root.loxone.retryConnection()
             }
           }
         }
 
         Column {
           width: parent.width
-          visible: root.serviceReady && root.hass.configured
+          visible: root.serviceReady && root.loxone.configured
             && root.hasDevices && root.rowCount === 0
           spacing: Style.spacing.xl
 
@@ -420,7 +435,7 @@ Panel {
 
             Repeater {
               id: entityRepeater
-              model: root.serviceReady ? root.hass.rows : null
+              model: root.serviceReady ? root.loxone.rows : null
               delegate: EntityRow {
                 // EntityRow declares required properties, which puts the
                 // delegate in required-properties mode: Qt then stops
@@ -431,12 +446,12 @@ Panel {
                 required property int index
 
                 width: rowsColumn.width
-                hass: root.hass
+                service: root.loxone
                 bar: root.bar
                 fill: root.hoverFill
                 currentFill: root.selectedFill
-                showIcon: root.serviceReady ? root.hass.showEntityIcons : true
-                reserveExpandSlot: root.serviceReady ? root.hass.rowsHaveExpandable : false
+                showIcon: root.serviceReady ? root.loxone.showEntityIcons : true
+                reserveExpandSlot: root.serviceReady ? root.loxone.rowsHaveExpandable : false
                 hasCursor: root.cursorActive && root.cursorIndex === index
                 expanded: root.expandedEntityId === entityId
                 onCursorRequested: {
@@ -451,6 +466,14 @@ Panel {
               }
             }
           }
+        }
+
+        // ---------- camera, always last ----------
+        CameraStream {
+          width: parent.width
+          visible: root.serviceReady && root.loxone.cameraConfigured
+          service: root.loxone
+          bar: root.bar
         }
       }
     }

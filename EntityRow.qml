@@ -2,6 +2,7 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 import "controls"
+import "Model.js" as Model
 
 // One device in the panel list, shaped after bluetooth/Panel.qml's DeviceRow.
 // The switch handles its own click, so on an expandable row the body is free
@@ -21,7 +22,7 @@ CursorSurface {
   required property bool expandable
   required property string domain
 
-  property var hass: null
+  property var service: null
   property QtObject bar: null
   property bool showIcon: true
   // Per-list: reserving always pushes every switch a chevron's width off the
@@ -58,28 +59,33 @@ CursorSurface {
   }
 
   function bodyClicked() {
-    if (!hass || !available) return
+    if (!service || !available) return
     if (expandable) expandToggled()
     else activate()
   }
 
   // Keyboard Enter. Stays on/off, because `e` already expands.
   function activate() {
-    if (!hass || !available) return
+    if (!service || !available) return
     switch (control) {
-    case "toggle": hass.toggleEntity(entityId); break
-    case "lock": hass.setLock(entityId, !isOn); break
-    case "activate": hass.activateScene(entityId); break
+    case "toggle": service.toggleEntity(entityId); break
+    case "lock": service.setLock(entityId, !isOn); break
+    case "activate": service.activateScene(entityId); break
     default: if (expandable) expandToggled()
     }
   }
 
   // stateRevision also re-evaluates bindings after nested attributes change.
   readonly property var entity: {
-    if (!hass) return null
-    hass.stateRevision
-    return hass.entityFor(entityId)
+    if (!service) return null
+    service.stateRevision
+    return service.entityFor(entityId)
   }
+
+  // Only the row itself needs raw capability flags — the projected `control`/
+  // `expandable` strings above cover every other domain. Currently just
+  // cover's inline up/stop/down buttons.
+  readonly property var capabilities: Model.capabilitiesFor(row.entity)
 
   // Declared first so the buttons above keep their own clicks.
   MouseArea {
@@ -166,12 +172,23 @@ CursorSurface {
         Text {
           textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
-          visible: row.control === "none"
+          // A cover's position is shown by its up/stop/down buttons being
+          // there at all, not by also repeating it as text next to them.
+          visible: row.control === "none" && row.domain !== "cover"
           text: row.badge
           color: row.dim
           font.family: row.family
           font.pixelSize: Style.font.caption
           font.bold: true
+        }
+
+        CoverControls {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: row.domain === "cover" && row.available
+          service: row.service
+          entityId: row.entityId
+          entity: row.entity
+          bar: row.bar
         }
 
         Text {
@@ -195,9 +212,9 @@ CursorSurface {
           cursorRing: false
           foreground: row.fg
           onToggled: {
-            if (!row.hass || !row.available) return
-            if (row.control === "lock") row.hass.setLock(row.entityId, !row.isOn)
-            else row.hass.toggleEntity(row.entityId)
+            if (!row.service || !row.available) return
+            if (row.control === "lock") row.service.setLock(row.entityId, !row.isOn)
+            else row.service.toggleEntity(row.entityId)
           }
         }
 
@@ -226,7 +243,7 @@ CursorSurface {
       id: expansion
       width: parent.width
       // Unloaded on collapse so sliders and timers do not live on.
-      active: row.expanded && row.expandable && row.hass !== null
+      active: row.expanded && row.expandable && row.service !== null
       visible: active
 
       sourceComponent: {
@@ -235,7 +252,6 @@ CursorSurface {
         case "light": return lightControls
         case "media_player": return mediaControls
         case "climate": return climateControls
-        case "cover": return coverControls
         default: return null
         }
       }
@@ -245,28 +261,21 @@ CursorSurface {
   Component {
     id: lightControls
     LightControls {
-      hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
+      service: row.service; entityId: row.entityId; entity: row.entity; bar: row.bar
     }
   }
 
   Component {
     id: mediaControls
     MediaControls {
-      hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
+      service: row.service; entityId: row.entityId; entity: row.entity; bar: row.bar
     }
   }
 
   Component {
     id: climateControls
     ClimateControls {
-      hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
-    }
-  }
-
-  Component {
-    id: coverControls
-    CoverControls {
-      hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
+      service: row.service; entityId: row.entityId; entity: row.entity; bar: row.bar
     }
   }
 }

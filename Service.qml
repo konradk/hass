@@ -7,17 +7,17 @@ import "EntityStore.js" as EntityStore
 import "ConfigStore.js" as ConfigStore
 import "RowModel.js" as RowModel
 
-// Owner of all Home Assistant state.
+// Owner of all Loxone state.
 //
 // A `service` is mounted once per session, a `bar-widget` once per monitor, so
 // the bridge, entities and config live here. Widgets reach them through
-// `bar.shell.serviceFor("hass")`.
+// `bar.shell.serviceFor("loxone")`.
 QtObject {
   id: root
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string pluginDir: home + "/.config/omarchy/plugins/hass"
-  readonly property string configDir: home + "/.config/omarchy/hass"
+  readonly property string pluginDir: home + "/.config/omarchy/plugins/loxone"
+  readonly property string configDir: home + "/.config/omarchy/loxone"
   readonly property string configPath: configDir + "/config.json"
 
   // idle | connecting | connected | error
@@ -27,6 +27,8 @@ QtObject {
   property bool configured: false
   property bool demoMode: false
   property string baseUrl: ""
+  property string username: ""
+  property bool verifyTls: false
   property int connectionGeneration: 0
   property bool connectionSuppressed: false
 
@@ -37,8 +39,171 @@ QtObject {
   property var states: ({})
   property int stateRevision: 0
 
+  // From the bridge's "registries" event — the Miniserver's rooms. Each
+  // entity carries its own room UUID directly (as `area_id`), so unlike Home
+  // Assistant there is no separate device layer to join through.
+  property var roomsList: []
   property var areaNames: ({})
   property var entityArea: ({})
+
+  // IRoomControllerV2 always works in Celsius; there is no instance-wide unit
+  // to negotiate.
+  readonly property string temperatureUnit: "°C"
+
+  // ------------------------------------------------------------ camera
+  //
+  // An arbitrary HTTP(S) camera stream, independent of the Miniserver — it
+  // has its own origin, its own credential, and its own lifecycle in the
+  // bridge. The frame itself never touches QML property bindings or the
+  // NDJSON channel: the bridge writes it straight to `cameraFramePath`, and
+  // CameraStream.qml rereads that file on a timer.
+
+  property string cameraUrl: ""
+  property string cameraUsername: ""
+  property bool cameraVerifyTls: false
+  // idle | connecting | streaming | error
+  property string cameraStatus: "idle"
+  property string cameraError: ""
+
+  readonly property bool cameraConfigured: root.cameraUrl.length > 0
+  readonly property string cameraFramePath: root.configDir + "/camera.jpg"
+
+  property string appliedCameraSignature: ""
+
+  function cameraOrigin() {
+    return Connection.normalizeOrigin(root.cameraUrl)
+  }
+
+  readonly property bool cameraCredentialBusy: cameraCredentials.busy
+
+  property CredentialManager cameraCredentials: CredentialManager {
+    onPasswordReady: function(password, origin) {
+      if (origin === root.cameraOrigin()) root.pushCameraConfig(password)
+    }
+    onCleared: function(origin) {
+      // Nothing further to do: applyCamera/removeCamera already cleared or
+      // set config.json, and the bridge already got camera_disconnect.
+    }
+    onFailed: function(message, origin) {
+      if (origin && origin !== root.cameraOrigin()) return
+      root.cameraStatus = "error"
+      root.cameraError = message
+    }
+  }
+
+  // Mirrors applyConnection, but lighter: a camera has no generation to
+  // reconcile against QML state and no "requires a fresh password" rule —
+  // reusing a stored one for the same origin is exactly the point.
+  function applyCamera(url, username, password) {
+    var trimmedUrl = String(url || "").trim()
+    var trimmedUser = String(username || "").trim()
+    if (!trimmedUrl) {
+      root.cameraStatus = "error"
+      root.cameraError = "Enter a camera stream URL."
+      return false
+    }
+    var origin = Connection.normalizeOrigin(trimmedUrl)
+    if (!origin) {
+      root.cameraStatus = "error"
+      root.cameraError = "Enter a valid http(s) camera stream URL."
+      return false
+    }
+    if (password.length > 0 && !cameraCredentials.store(password, origin)) {
+      root.cameraStatus = "error"
+      root.cameraError = "Could not start password storage while the keyring is busy."
+      return false
+    }
+    root.saveConfig({ cameraUrl: trimmedUrl, cameraUsername: trimmedUser })
+    if (password.length === 0) root.pushCameraCredentials()
+    return true
+  }
+
+  function removeCamera() {
+    if (root.cameraCredentialBusy) {
+      root.lastError = "Wait for the current keyring operation to finish."
+      return
+    }
+    var origin = root.cameraOrigin()
+    root.send({ op: "camera_disconnect" })
+    root.appliedCameraSignature = ""
+    root.cameraStatus = "idle"
+    root.cameraError = ""
+    root.saveConfig({ cameraUrl: "", cameraUsername: "" })
+    if (origin) cameraCredentials.clear(origin)
+  }
+
+  function pushCameraCredentials() {
+    if (!root.cameraConfigured) return
+    if (cameraCredentials.writePending) return
+    var origin = root.cameraOrigin()
+    if (!origin) return
+    if (!cameraCredentials.lookup(origin)) cameraCredentialRetry.restart()
+  }
+
+  property Timer cameraCredentialRetry: Timer {
+    interval: 400
+    onTriggered: root.pushCameraCredentials()
+  }
+
+  function pushCameraConfig(password) {
+    root.send({
+      op: "camera_config",
+      url: root.cameraUrl,
+      username: root.cameraUsername,
+      password: password,
+      verifyTls: root.cameraVerifyTls,
+      framePath: root.cameraFramePath
+    })
+  }
+
+  function setCameraVerifyTls(enabled) {
+    if (root.cameraVerifyTls === enabled) return
+    root.saveConfig({ cameraVerifyTls: enabled })
+  }
+
+  // Only reconnects the camera when its own identity actually changed —
+  // toggling a favorite must not restart a camera stream that is fine.
+  function reconcileCamera() {
+    if (!root.cameraConfigured) {
+      if (root.appliedCameraSignature !== "") {
+        root.send({ op: "camera_disconnect" })
+      }
+      root.appliedCameraSignature = ""
+      root.cameraStatus = "idle"
+      return
+    }
+    var signature = root.cameraUrl + "|" + root.cameraUsername + "|" + root.cameraVerifyTls
+    if (signature === root.appliedCameraSignature) return
+    root.appliedCameraSignature = signature
+    root.pushCameraCredentials()
+  }
+
+  // A configured camera still costs the camera itself something to serve —
+  // network and encoder load — for as long as the bridge is pulling frames.
+  // That cost is only worth paying while a surface is actually showing the
+  // stream: the bar popover, or Settings' own Camera tab (so "Connect" gives
+  // immediate feedback). Panel.qml and Settings.qml each call register/
+  // unregister from their own `opened` transitions; the count, not a single
+  // bool, is what makes "both happen to be open at once" not a bug.
+  property int cameraViewerCount: 0
+
+  function registerCameraViewer() {
+    root.cameraViewerCount++
+    if (root.cameraViewerCount === 1) root.resumeCamera()
+  }
+
+  function unregisterCameraViewer() {
+    root.cameraViewerCount = Math.max(0, root.cameraViewerCount - 1)
+    if (root.cameraViewerCount === 0) root.pauseCamera()
+  }
+
+  function resumeCamera() {
+    root.send({ op: "camera_resume" })
+  }
+
+  function pauseCamera() {
+    root.send({ op: "camera_pause" })
+  }
 
   // Disjoint namespaces: one shared list would show ghosts after a mode switch.
   property var liveFavorites: []
@@ -63,10 +228,6 @@ QtObject {
   // instead of recreating every row.
   property ListModel rows: ListModel {}
 
-  // Instance-wide, from the bridge's get_config. Climate entities carry no
-  // unit of their own, so without this every temperature renders bare.
-  property string temperatureUnit: ""
-
   // ------------------------------------------------------------ config
 
   property FileView configFile: FileView {
@@ -82,6 +243,8 @@ QtObject {
   function currentConfig() {
     return {
       baseUrl: root.baseUrl,
+      username: root.username,
+      verifyTls: root.verifyTls,
       demoMode: root.demoMode,
       favorites: root.liveFavorites.slice(),
       demoFavorites: root.demoFavorites.slice(),
@@ -89,7 +252,10 @@ QtObject {
       showEntityIcons: root.showEntityIcons,
       selectedTab: root.activeTab,
       displayNameOverrides: root.displayNameOverrides,
-      iconOverrides: root.iconOverrides
+      iconOverrides: root.iconOverrides,
+      cameraUrl: root.cameraUrl,
+      cameraUsername: root.cameraUsername,
+      cameraVerifyTls: root.cameraVerifyTls
     }
   }
 
@@ -105,6 +271,11 @@ QtObject {
   function setGroupByArea(enabled) {
     if (root.groupByArea === enabled) return
     root.saveConfig({ groupByArea: enabled })
+  }
+
+  function setVerifyTls(enabled) {
+    if (root.verifyTls === enabled) return
+    root.saveConfig({ verifyTls: enabled })
   }
 
   // FileView will not create a missing parent directory, and starting the
@@ -145,15 +316,13 @@ QtObject {
 
   // ------------------------------------------------------------ credentials
 
-  readonly property bool tokenWritePending: credentials.writePending
-  readonly property bool tokenClearPending: credentials.clearPending
   readonly property bool credentialBusy: credentials.busy
 
   property CredentialManager credentials: CredentialManager {
-    onTokenReady: function(token, origin) {
+    onPasswordReady: function(password, origin) {
       if (!root.demoMode && !root.connectionSuppressed
           && origin === root.currentOrigin()) {
-        root.pushConfig(token)
+        root.pushConfig(password)
       } else if (!root.connectionSuppressed) {
         Qt.callLater(root.pushCredentials)
       }
@@ -173,7 +342,7 @@ QtObject {
     return Connection.normalizeOrigin(root.baseUrl)
   }
 
-  function requiresTokenFor(url) {
+  function requiresPasswordFor(url) {
     var origin = Connection.normalizeOrigin(url)
     if (!origin) return true
     return root.demoMode || !root.configured || origin !== root.currentOrigin()
@@ -195,14 +364,14 @@ QtObject {
     }
     if (!credentials.clear(origin)) {
       root.phase = "error"
-      root.lastError = "Could not start token removal while the keyring is busy."
+      root.lastError = "Could not start password removal while the keyring is busy."
     }
   }
 
   function finishRemoveConnection() {
     root.connectionSuppressed = false
     root.saveConfig({
-      baseUrl: "", demoMode: false, favorites: [],
+      baseUrl: "", username: "", demoMode: false, favorites: [],
       displayNameOverrides: {}, iconOverrides: {}, selectedTab: "favorites"
     })   // demoFavorites untouched: not part of the connection
   }
@@ -235,27 +404,33 @@ QtObject {
     root.reconcileConnection()
   }
 
-  function applyConnection(url, token, demo) {
+  function applyConnection(url, username, password, demo) {
     var origin = demo ? "demo" : Connection.normalizeOrigin(url)
     if (!origin) {
       root.phase = "error"
-      root.lastError = "Enter a valid http(s) or ws(s) Home Assistant URL."
+      root.lastError = "Enter a valid http(s) Miniserver URL."
       return false
     }
-    if (!demo && !token && root.requiresTokenFor(url)) {
+    var trimmedUser = String(username || "").trim()
+    if (!demo && !trimmedUser) {
       root.phase = "error"
-      root.lastError = "A new Home Assistant origin requires a new token."
+      root.lastError = "Enter the Miniserver username."
+      return false
+    }
+    if (!demo && !password && root.requiresPasswordFor(url)) {
+      root.phase = "error"
+      root.lastError = "A new Miniserver origin requires its password again."
       return false
     }
     root.connectionSuppressed = false
     // Start the serialized write before applyConfig runs so reconciliation
     // cannot race a lookup of the previous credential.
-    if (!demo && token.length > 0 && !credentials.store(token, origin)) {
+    if (!demo && password.length > 0 && !credentials.store(password, origin)) {
       root.phase = "error"
-      root.lastError = "Could not start token storage while the keyring is busy."
+      root.lastError = "Could not start password storage while the keyring is busy."
       return false
     }
-    root.saveConfig({ baseUrl: url, demoMode: demo })
+    root.saveConfig({ baseUrl: url, username: trimmedUser, demoMode: demo })
     return true
   }
 
@@ -271,6 +446,7 @@ QtObject {
       // still runs: it is idempotent, and it is what restarts a bridge that
       // exited since the last apply.
       root.reconcileConnection()
+      root.reconcileCamera()
       return
     }
     root.appliedConfigText = text
@@ -280,6 +456,8 @@ QtObject {
 
     root.demoMode = config.demoMode
     root.baseUrl = config.baseUrl
+    root.username = config.username
+    root.verifyTls = config.verifyTls
     root.liveFavorites = config.favorites
     root.demoFavorites = config.demoFavorites
     root.displayNameOverrides = config.displayNameOverrides
@@ -287,24 +465,28 @@ QtObject {
     root.groupByArea = config.groupByArea
     root.showEntityIcons = config.showEntityIcons
     root.activeTab = config.selectedTab
+    root.cameraUrl = config.cameraUrl
+    root.cameraUsername = config.cameraUsername
+    root.cameraVerifyTls = config.cameraVerifyTls
 
     root.configured = root.demoMode || root.baseUrl.length > 0
     rebuildSortedIds()
     rebuildRows()
     root.reconcileConnection()
+    root.reconcileCamera()
   }
 
   // Which connection the bridge is running for. Config is saved on every
-  // favorite toggle, and those must not drop the WebSocket.
+  // favorite toggle, and those must not drop the connection.
   property string appliedConnection: ""
 
   function forgetDevices() {
     root.states = ({})
     root.stateRevision++
     root.sortedEntityIds = []
+    root.roomsList = []
     root.areaNames = ({})
     root.entityArea = ({})
-    root.temperatureUnit = ""
     root.pendingToggles = ({})
     pendingSweep.running = false
     root.rebuildRows()
@@ -320,9 +502,9 @@ QtObject {
 
     if (!root.configured) {
       if (root.appliedConnection !== "") {
-        // Clearing the config is not enough: the bridge holds an authenticated
-        // socket open with the old token until it is told otherwise, and keeps
-        // feeding this service devices the user just removed.
+        // Clearing the config is not enough: the bridge keeps polling the
+        // Miniserver with the old password until it is told otherwise, and
+        // keeps feeding this service devices the user just removed.
         root.disconnectBridge()
         root.forgetDevices()
       }
@@ -336,7 +518,7 @@ QtObject {
     var signature = Connection.signature(root.demoMode, root.baseUrl)
     if (!signature) {
       root.phase = "error"
-      root.lastError = "Home Assistant URL is invalid."
+      root.lastError = "Miniserver URL is invalid."
       return
     }
     if (signature === root.appliedConnection && bridgeController.running) return
@@ -358,15 +540,15 @@ QtObject {
       root.pushConfig("")
       return
     }
-    // A token being written pushes itself; reading here would race it.
+    // A password being written pushes itself; reading here would race it.
     if (credentials.writePending) return
     var origin = root.currentOrigin()
     if (!origin) return
     // lookup() refuses while any other keyring process is in flight, and says
     // so only through its return value. Dropping that on the floor leaves the
-    // panel stuck on "connecting" with nothing queued to push a token — the
-    // window is short (every keyring op has a 5s start timeout) but it is
-    // reached whenever the bridge restarts during a legacy-token check.
+    // panel stuck on "connecting" with nothing queued to push a password —
+    // the window is short (every keyring op has a 5s start timeout) but it is
+    // reached whenever the bridge restarts during a lookup already in flight.
     if (!credentials.lookup(origin)) credentialRetry.restart()
   }
 
@@ -381,7 +563,7 @@ QtObject {
   // ------------------------------------------------------------ bridge
 
   property BridgeController bridgeController: BridgeController {
-    executable: root.pluginDir + "/bin/hass-bridge"
+    executable: root.pluginDir + "/bin/loxone-bridge"
     protocolVersion: 1
     onLine: function(value) { root.handleEvent(value) }
     onReady: {
@@ -407,24 +589,21 @@ QtObject {
     return bridgeController.send(command)
   }
 
-  function pushConfig(token) {
+  function pushConfig(password) {
     root.send({
       op: "config",
       url: root.baseUrl,
-      token: token,
+      username: root.username,
+      password: password,
+      verifyTls: root.verifyTls,
       generation: root.connectionGeneration
     })
   }
 
-  function callService(domain, service, entityId, data, tag) {
-    return root.send({
-      op: "call_service",
-      domain: domain,
-      service: service,
-      entity_id: entityId,
-      data: data || {},
-      tag: tag || ""
-    })
+  function sendCommand(entityId, command, value, tag) {
+    var payload = { op: "command", entity_id: entityId, command: command, tag: tag || "" }
+    if (value !== undefined) payload.value = value
+    return root.send(payload)
   }
 
   // ------------------------------------------------------------ actions
@@ -444,9 +623,9 @@ QtObject {
     return false
   }
 
-  // Must outlast the bridge's own REQUEST_TIMEOUT (5s), or a slow-but-successful
-  // call reports "no response" here while the bridge is still waiting for the
-  // answer it goes on to receive.
+  // Must outlast the bridge's own poll interval, or a slow-but-successful
+  // command reports "no response" here while the bridge is still waiting for
+  // the answer it goes on to receive.
   readonly property int pendingToggleTimeout: 6500
 
   function setPendingToggle(entityId, desired) {
@@ -473,7 +652,7 @@ QtObject {
     for (var i = 0; i < expired.length; i++) {
       delete root.pendingToggles[expired[i]]
       root.refreshRow(expired[i])
-      root.lastError = "No response from Home Assistant."
+      root.lastError = "No response from the Miniserver."
     }
     if (!root.hasPendingToggles()) pendingSweep.running = false
   }
@@ -499,8 +678,7 @@ QtObject {
     var currentlyOn = root.displayIsOn(entityId)
     var call = Model.toggleCall(entity, currentlyOn)
     root.setPendingToggle(entityId, !currentlyOn)
-    var sent = root.callService(
-      call.domain, call.service, entityId, {}, "toggle:" + entityId)
+    var sent = root.sendCommand(entityId, call.command, undefined, "toggle:" + entityId)
     if (!sent) {
       root.clearPendingToggle(entityId)
       root.refreshRow(entityId)
@@ -516,8 +694,8 @@ QtObject {
   }
 
   // Every call is tagged. An untagged one has its failure dropped on the floor
-  // by the bridge, which is how a rejected scene or a refused cover used to
-  // look exactly like a button that does nothing.
+  // by the bridge, which is how a rejected pushbutton or a refused cover used
+  // to look exactly like a button that does nothing.
   function callTag(entityId) {
     return "call:" + entityId
   }
@@ -526,12 +704,8 @@ QtObject {
     if (!root.capabilities(entityId).brightness) {
       return root.rejectAction("This light does not support brightness control.")
     }
-    if (percent <= 0) {
-      root.callService("light", "turn_off", entityId, {}, root.callTag(entityId))
-      return
-    }
-    root.callService("light", "turn_on", entityId,
-                     { brightness_pct: Math.round(percent) }, root.callTag(entityId))
+    var clamped = Math.max(0, Math.min(100, Math.round(percent)))
+    root.sendCommand(entityId, "set_brightness", clamped, root.callTag(entityId))
   }
 
   function setVolume(entityId, level) {
@@ -539,32 +713,28 @@ QtObject {
       return root.rejectAction("This media player does not support volume control.")
     }
     var clamped = Math.max(0, Math.min(1, level))
-    root.callService("media_player", "volume_set", entityId,
-                     { volume_level: clamped }, root.callTag(entityId))
+    root.sendCommand(entityId, "set_volume", clamped, root.callTag(entityId))
   }
 
   function mediaPlayPause(entityId) {
     if (!root.capabilities(entityId).mediaPlayPause) {
       return root.rejectAction("This media player does not support play/pause.")
     }
-    root.callService("media_player", "media_play_pause", entityId, {},
-                     root.callTag(entityId))
+    root.sendCommand(entityId, "media_play_pause", undefined, root.callTag(entityId))
   }
 
   function mediaNext(entityId) {
     if (!root.capabilities(entityId).mediaNext) {
       return root.rejectAction("This media player does not support next track.")
     }
-    root.callService("media_player", "media_next_track", entityId, {},
-                     root.callTag(entityId))
+    root.sendCommand(entityId, "media_next", undefined, root.callTag(entityId))
   }
 
   function mediaPrevious(entityId) {
     if (!root.capabilities(entityId).mediaPrevious) {
       return root.rejectAction("This media player does not support previous track.")
     }
-    root.callService("media_player", "media_previous_track", entityId, {},
-                     root.callTag(entityId))
+    root.sendCommand(entityId, "media_previous", undefined, root.callTag(entityId))
   }
 
   function coverAction(entityId, service) {
@@ -574,7 +744,7 @@ QtObject {
       : service === "close_cover" ? caps.coverClose
       : false
     if (!supported) return root.rejectAction("This cover does not support that action.")
-    root.callService("cover", service, entityId, {}, root.callTag(entityId))
+    root.sendCommand(entityId, service, undefined, root.callTag(entityId))
   }
 
   function setLock(entityId, locked) {
@@ -583,8 +753,7 @@ QtObject {
     }
     root.setPendingToggle(entityId, locked)
     // toggleEntity's tag prefix, so rollback runs through one path.
-    var sent = root.callService("lock", locked ? "lock" : "unlock", entityId, {},
-                                "toggle:" + entityId)
+    var sent = root.sendCommand(entityId, locked ? "on" : "off", undefined, "toggle:" + entityId)
     if (!sent) {
       root.clearPendingToggle(entityId)
       root.refreshRow(entityId)
@@ -593,7 +762,7 @@ QtObject {
   }
 
   // The primary action for a row, whatever that means for its domain. IPC and
-  // the panel's Enter key both land here, so `hass toggleEntity lock.front`
+  // the panel's Enter key both land here, so `loxone toggleEntity light.desk`
   // does what the row's own switch does instead of reporting the entity as
   // not toggleable — `toggle` capability covers only the on/off domains.
   function activateEntity(entityId) {
@@ -609,21 +778,18 @@ QtObject {
 
   function activateScene(entityId) {
     if (!root.capabilities(entityId).activate) {
-      return root.rejectAction("Only scenes and scripts can be activated.")
+      return root.rejectAction("Only pushbuttons can be activated.")
     }
-    var domain = Model.domainOf(entityId)
-    return root.callService(domain, "turn_on", entityId, {}, root.callTag(entityId))
+    return root.sendCommand(entityId, "activate", undefined, root.callTag(entityId))
   }
 
   function setClimateTemperature(entityId, target, low, high) {
     var entity = root.states[entityId]
-    var data = Model.climateTemperatureData(
-      entity, target, low, high, root.temperatureUnit)
+    var data = Model.climateTemperatureData(entity, target, root.temperatureUnit)
     if (Object.keys(data).length === 0) {
       return root.rejectAction("This climate entity does not report a controllable target.")
     }
-    root.callService("climate", "set_temperature", entityId, data,
-                     root.callTag(entityId))
+    root.sendCommand(entityId, "set_temperature", data.temperature, root.callTag(entityId))
   }
 
   function refresh() {
@@ -643,6 +809,16 @@ QtObject {
       return
     }
     if (!event || typeof event !== "object") return
+
+    // The camera has its own lifecycle, independent of the Miniserver
+    // connection generation — it carries none, so it must not be run through
+    // a gate built for one.
+    if (event.ev === "camera") {
+      root.cameraStatus = String(event.status || "idle")
+      root.cameraError = typeof event.error === "string" ? event.error : ""
+      return
+    }
+
     if (!Connection.acceptsGeneration(root.connectionGeneration, event.generation)) {
       return
     }
@@ -670,20 +846,19 @@ QtObject {
       root.states = EntityStore.removeState(root.states, event.entity_id)
       root.stateRevision++
       root.rebuildSortedIds()
+      root.recomputeAreas()
       root.rebuildRows()
       break
     case "registries":
-      root.applyRegistries(event)
-      break
-    case "config":
-      root.temperatureUnit = String(event.unit_temperature || "")
+      root.roomsList = Array.isArray(event.rooms) ? event.rooms : []
+      root.recomputeAreas()
       root.rebuildRows()
       break
     case "result":
       root.handleResult(event)
       break
     case "log":
-      if (event.level === "warn") console.warn("hass-bridge: " + event.msg)
+      if (event.level === "warn") console.warn("loxone-bridge: " + event.msg)
       break
     }
   }
@@ -707,24 +882,36 @@ QtObject {
     root.states = EntityStore.indexStates(entities)
     root.stateRevision++
     root.rebuildSortedIds()
+    root.recomputeAreas()
     root.rebuildRows()
   }
 
   function applyStateChanged(entity) {
     if (!entity || !entity.entity_id) return
     // The browser walks the sorted index, not `states`, so an entity that
-    // appears after the snapshot — a new device, a restarted integration —
-    // stays unfindable in settings until the index is rebuilt.
+    // appears after the snapshot stays unfindable in settings until the
+    // index is rebuilt.
     var isNew = root.states[entity.entity_id] === undefined
     root.states = EntityStore.upsertState(root.states, entity)
     root.stateRevision++
     root.clearPendingToggle(entity.entity_id)
     if (isNew) {
       root.rebuildSortedIds()
+      root.recomputeAreas()
       root.rebuildRows()
     } else {
       root.refreshRow(entity.entity_id)
     }
+  }
+
+  // Every entity carries its own room UUID directly (`area_id`), so this is a
+  // straight projection over the current state map plus the rooms list.
+  function recomputeAreas() {
+    var list = []
+    for (var id in root.states) list.push(root.states[id])
+    var projection = EntityStore.projectRegistries(root.roomsList, list)
+    root.areaNames = projection.areaNames
+    root.entityArea = projection.entityArea
   }
 
   // Drives EntityRow.reserveExpandSlot.
@@ -750,14 +937,6 @@ QtObject {
     }
   }
 
-  function applyRegistries(event) {
-    var projection = EntityStore.projectRegistries(
-      event.areas, event.entities, event.devices)
-    root.areaNames = projection.areaNames
-    root.entityArea = projection.entityArea
-    root.rebuildRows()
-  }
-
   // ------------------------------------------------------------ rows
 
   // Attributes the row model does not carry, for the expanded controls.
@@ -766,7 +945,7 @@ QtObject {
   }
 
   // Display order, rebuilt only when the *set* of entities changes: sorting
-  // per keystroke is what made the settings search lag.
+  // per poll tick is what would make the settings search lag.
   property var sortedEntityIds: []
 
   function rebuildSortedIds() {
@@ -782,7 +961,9 @@ QtObject {
       var entity = root.states[entityId]
       if (!entity) continue
       if (!Model.filterMatches(filterId, entity)) continue
-      if (!Model.searchMatches(query, entity)) continue
+      var areaId = root.entityArea[entityId]
+      var areaName = areaId ? root.areaNames[areaId] : ""
+      if (!Model.searchMatches(query, entity, areaName)) continue
       out.push({
         entityId: entityId,
         name: root.displayName(entityId),
@@ -830,7 +1011,17 @@ QtObject {
     if (override) return String(override)
     var entity = root.states[entityId]
     // A missing entity still has to be identifiable.
-    return entity ? Model.name(entity) : entityId
+    var base = entity ? Model.name(entity) : entityId
+    // Loxone control names repeat across rooms constantly — "Jalousie" in
+    // every room with a blind — so the room goes on the end wherever this
+    // name is shown, not just in the picker.
+    var areaId = root.entityArea[entityId]
+    var areaName = areaId ? root.areaNames[areaId] : ""
+    // Loxone setups commonly name a room's one light after the room itself
+    // ("Empore" the room, "Empore" the light) — "Empore (Empore)" would be
+    // noise, not disambiguation.
+    if (!areaName || areaName.toLowerCase() === base.toLowerCase()) return base
+    return base + " (" + areaName + ")"
   }
 
   // A literal glyph, so any Nerd Font character works.
@@ -861,7 +1052,7 @@ QtObject {
   }
 
   // `activeTab` is the saved intent, `effectiveTab` what exists right now.
-  // Area tabs appear only once the registries arrive; overwriting the intent
+  // Area tabs appear only once the rooms list arrives; overwriting the intent
   // in that window would discard the saved tab on every launch.
   readonly property string effectiveTab: {
     root.tabsRevision

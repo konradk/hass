@@ -25,19 +25,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Vendored dependency integrity and offline import
-        run: |
-          python3 tests/test_vendor.py
-          bash -n scripts/update-websockets-vendor
-
       - name: Python syntax
-        run: python3 -m py_compile bin/hass-bridge tests/*.py
+        run: python3 -m py_compile bin/loxone-bridge tests/*.py
 
-      - name: Bridge (NDJSON in, NDJSON out, against a fake Home Assistant)
+      - name: Bridge (NDJSON in, NDJSON out, against a fake Miniserver)
         env:
           PYTHONNOUSERSITE: "1"
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 tests/test_bridge.py
+        run: python3 tests/test_loxone_bridge.py
+
+      - name: WebSocket push protocol (RSA, WS framing, token handshake)
+        env:
+          PYTHONNOUSERSITE: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 tests/test_loxone_ws_protocol.py
 
       - name: JavaScript domain and lifecycle modules
         run: |

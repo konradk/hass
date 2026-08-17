@@ -7,7 +7,7 @@ import "../Model.js" as Model
 Item {
   id: control
 
-  required property var hass
+  required property var service
   required property string entityId
   property var entity: null
   property QtObject bar: null
@@ -42,7 +42,7 @@ Item {
         tooltipText: "Previous"
         foreground: control.fg
         fontFamily: control.family
-        onClicked: control.hass.mediaPrevious(control.entityId)
+        onClicked: control.service.mediaPrevious(control.entityId)
       }
 
       PanelActionButton {
@@ -51,7 +51,7 @@ Item {
         tooltipText: control.playing ? "Pause" : "Play"
         foreground: control.fg
         fontFamily: control.family
-        onClicked: control.hass.mediaPlayPause(control.entityId)
+        onClicked: control.service.mediaPlayPause(control.entityId)
       }
 
       PanelActionButton {
@@ -60,7 +60,7 @@ Item {
         tooltipText: "Next"
         foreground: control.fg
         fontFamily: control.family
-        onClicked: control.hass.mediaNext(control.entityId)
+        onClicked: control.service.mediaNext(control.entityId)
       }
     }
 
@@ -78,7 +78,7 @@ Item {
       onMoved: function(value) { control.localVolume = value }
       onReleased: function(value) {
         control.localVolume = -1
-        control.hass.setVolume(control.entityId, value)
+        control.service.setVolume(control.entityId, value)
       }
     }
   }

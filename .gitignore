@@ -5,8 +5,8 @@ __pycache__/
 *.jsc
 
 # A development symlink makes the plugin write its local settings here.
-# It never contains the access token, but may contain private instance URLs,
-# area names, entity IDs, and display-name overrides.
+# It never contains the Miniserver password, but may contain a private
+# Miniserver URL, room names, entity IDs, and display-name overrides.
 /config.json
 
 # Keep ad-hoc local secrets and diagnostic output out of a public checkout.

@@ -2,7 +2,8 @@
 
 // Pure connection and credential identity helpers. Keeping URL normalization
 // outside Service.qml makes the security boundary testable with Node as well
-// as usable by the QML service.
+// as usable by the QML service. Nothing in here is Loxone-specific: a
+// Miniserver origin is just another http(s)/ws(s) URL.
 
 function preparedUrl(value) {
   var text = String(value || "").trim()
@@ -69,10 +70,10 @@ function normalizeOrigin(value) {
 
 // Which connection the bridge is running for, as reconciliation compares it.
 //
-// The origin alone is not enough. It is the credential scope — what a token is
-// filed under — but the bridge connects to the whole URL, path included, so
+// The origin alone is not enough. It is the credential scope — what a password
+// is filed under — but the bridge connects to the whole URL, path included, so
 // two URLs can share an origin and still be different connections. Editing the
-// path has to restart the bridge even though the stored token still applies.
+// path has to restart the bridge even though the stored password still applies.
 //
 // Empty when the URL cannot be normalized; callers treat that as invalid
 // rather than as a connection worth starting.

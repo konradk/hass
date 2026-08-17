@@ -8,7 +8,7 @@ import "../Model.js" as Model
 Item {
   id: control
 
-  required property var hass
+  required property var service
   required property string entityId
   property var entity: null
   property QtObject bar: null
@@ -18,9 +18,8 @@ Item {
 
   implicitHeight: column.implicitHeight
 
-  // Climate entities carry no unit; the instance-wide one comes from the
-  // service, which got it from the bridge's get_config.
-  readonly property string instanceUnit: hass ? hass.temperatureUnit : ""
+  // IRoomControllerV2 is always Celsius; the service exposes a constant unit.
+  readonly property string instanceUnit: service ? service.temperatureUnit : ""
 
   readonly property string unit: entity
     ? Model.temperatureUnit(entity, instanceUnit) : ""
@@ -58,22 +57,22 @@ Item {
 
   function commitTarget(value) {
     control.localTarget = -999
-    control.hass.setClimateTemperature(control.entityId, control.clamp(value),
-                                       undefined, undefined)
+    control.service.setClimateTemperature(control.entityId, control.clamp(value),
+                                          undefined, undefined)
   }
 
+  // Loxone's IRoomControllerV2 has one comfort setpoint, not a low/high band —
+  // this stays dead code (`control.ranged` is always false) until a control
+  // type that reports one exists, matching MediaControls' "not wired up yet".
   function commitRange(changedLow, value) {
-    // Send both ends together: Home Assistant's set_temperature rejects a
-    // partial range, and the untouched end must keep its current value rather
-    // than fall back to a default.
     var low = changedLow ? control.clamp(value) : control.low
     var high = changedLow ? control.high : control.clamp(value)
     var normalizedLow = Math.min(low, high)
     var normalizedHigh = Math.max(low, high)
     control.localLow = -999
     control.localHigh = -999
-    control.hass.setClimateTemperature(control.entityId, undefined,
-                                       normalizedLow, normalizedHigh)
+    control.service.setClimateTemperature(control.entityId, undefined,
+                                          normalizedLow, normalizedHigh)
   }
 
   Column {

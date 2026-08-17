@@ -1,7 +1,8 @@
 .pragma library
 
-// One raw entity plus display context in, one ListModel row out. The model API
-// is injected so this mapper stays independent of QML imports and easy to test.
+// One raw Loxone control entity plus display context in, one ListModel row
+// out. The model API is injected so this mapper stays independent of QML
+// imports and easy to test.
 function project(entityId, entity, context, model) {
   var caps = model.capabilitiesFor(entity)
   var areaId = (context.entityArea || {})[entityId] || ""

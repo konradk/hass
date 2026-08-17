@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "hass",
-  "name": "Home Assistant",
-  "version": "0.2.2",
-  "author": "Konrad Kruk",
+  "id": "loxone",
+  "name": "Loxone",
+  "version": "0.1.0",
+  "author": "Bernhard Rode",
   "license": "MIT",
-  "description": "View and control Home Assistant devices from the Omarchy bar.",
+  "description": "View and control Loxone Miniserver devices from the Omarchy bar.",
   "kinds": [
     "service",
     "bar-widget",
@@ -17,8 +17,8 @@
     "overlay": "Settings.qml"
   },
   "barWidget": {
-    "displayName": "Home Assistant",
-    "description": "Favorites-first control of Home Assistant entities.",
+    "displayName": "Loxone",
+    "description": "Favorites-first control of Loxone Miniserver devices.",
     "category": "Home",
     "allowMultiple": false,
     "defaultSection": "right"

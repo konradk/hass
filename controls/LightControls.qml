@@ -6,7 +6,7 @@ import "../Model.js" as Model
 Item {
   id: control
 
-  required property var hass
+  required property var service
   required property string entityId
   property var entity: null
   property QtObject bar: null
@@ -35,11 +35,11 @@ Item {
     step: 1
 
     onMoved: function(value) { control.localValue = value }
-    // On release only: a call per pixel floods Home Assistant and makes the
-    // light stutter trying to follow.
+    // On release only: a command per pixel floods the Miniserver and makes
+    // the light stutter trying to follow.
     onReleased: function(value) {
       control.localValue = -1
-      control.hass.setBrightness(control.entityId, value)
+      control.service.setBrightness(control.entityId, value)
     }
   }
 }

@@ -1,8 +1,9 @@
 .pragma library
 
 var KEYS = [
-  "baseUrl", "demoMode", "favorites", "demoFavorites", "groupByArea",
-  "showEntityIcons", "selectedTab", "displayNameOverrides", "iconOverrides"
+  "baseUrl", "username", "verifyTls", "demoMode", "favorites", "demoFavorites",
+  "groupByArea", "showEntityIcons", "selectedTab", "displayNameOverrides",
+  "iconOverrides", "cameraUrl", "cameraUsername", "cameraVerifyTls"
 ]
 
 function stringList(value, fallback) {
@@ -11,7 +12,7 @@ function stringList(value, fallback) {
   var seen = {}
   for (var i = 0; i < value.length; i++) {
     if (typeof value[i] === "string"
-        && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(value[i])
+        && /^[a-z_]+\.[0-9a-f-]{8,}$/.test(value[i])
         && !seen[value[i]]) {
       seen[value[i]] = true
       out.push(value[i])
@@ -48,6 +49,11 @@ function parse(text, demoDefaults) {
     error: error,
     config: {
       baseUrl: typeof raw.baseUrl === "string" ? raw.baseUrl : "",
+      username: typeof raw.username === "string" ? raw.username : "",
+      // Loxone Miniservers overwhelmingly run on a self-signed local
+      // certificate; defaulting verification off matches what actually
+      // works out of the box; a user with a real certificate can turn it on.
+      verifyTls: raw.verifyTls === true,
       demoMode: raw.demoMode === true,
       favorites: stringList(raw.favorites, []),
       demoFavorites: stringList(raw.demoFavorites,
@@ -57,7 +63,14 @@ function parse(text, demoDefaults) {
       selectedTab: typeof raw.selectedTab === "string" && raw.selectedTab
         ? raw.selectedTab : "favorites",
       displayNameOverrides: plainMap(raw.displayNameOverrides),
-      iconOverrides: plainMap(raw.iconOverrides)
+      iconOverrides: plainMap(raw.iconOverrides),
+      // An arbitrary HTTP(S) camera, independent of the Miniserver — see
+      // Service.qml's camera functions. Only the URL and username are
+      // config.json material; the password goes through the same keyring
+      // path as the Miniserver's.
+      cameraUrl: typeof raw.cameraUrl === "string" ? raw.cameraUrl : "",
+      cameraUsername: typeof raw.cameraUsername === "string" ? raw.cameraUsername : "",
+      cameraVerifyTls: raw.cameraVerifyTls === true
     }
   }
 }

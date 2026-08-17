@@ -1,0 +1,2207 @@
+#!/usr/bin/env python3
+"""Polling bridge between the Omarchy shell and a Loxone Miniserver.
+
+QML has no HTTP or WebSocket client: Quickshell's Io module offers Process,
+unix-domain Socket and FileView, so the shell talks to the Miniserver through
+this helper process instead, the same way Omarchy's other plugins reach for
+one (weather calls curl, tailscale calls the tailscale CLI).
+
+Everything is NDJSON — one JSON object per line, in both directions. The shell
+writes commands on our stdin and reads events from our stdout.
+
+Why polling, not the Miniserver's push WebSocket — mostly
+------------------------------------------------------------
+A Loxone Miniserver's live-update channel is a proprietary binary protocol
+layered on its WebSocket endpoint: an RSA key exchange followed by an
+HMAC-signed token handshake (see Loxone's own "Loxone Web Services" spec).
+Building that without a third-party crypto library — required to keep this
+plugin installing with no pip, no virtualenv and no first-run download, see
+AGENTS.md — sounds like it needs one, but does not: the handshake only ever
+needs RSA *public-key encryption*, never decryption or key generation, which
+is DER-parsing plus modular exponentiation (`pow(base, exp, mod)`, built in
+and already efficient for arbitrary-precision integers) — both squarely
+within the standard library. See RsaPublicKey/rsa_pkcs1v15_encrypt and
+WebSocketClient below.
+
+Even so, the bridge does not use this to replace HTTP polling wholesale —
+every command and every *other* control's live state is still a single
+HTTPS GET behind Basic auth (`/data/LoxApp3.json` for the structure,
+`/dev/sps/io/<uuid>/all` for a control's current state, `/jdev/sps/io/
+<uuid>/<command>` to act on one — the same endpoints the reference `lox`
+CLI uses), polled every couple of seconds. The one confirmed, narrow
+exception is `LightControllerV2`: verified live against a real Miniserver,
+its `/all` HTTP response's `value` does not change with the control's actual
+state at all, so there is no polling interval short enough to fix it — only
+its `activeMoods` push state (`[778]` is Loxone's system-reserved "off" mood;
+anything else is on) is reliable. LivePushThread exists solely to subscribe
+to that one state, for that one control type; it is a narrow, best-effort
+enhancement layered on top of the polling architecture, not a replacement
+for it — if the handshake or connection fails for any reason (older
+firmware, network hiccup), CommandWorker's own optimistic hint keeps that
+control type usable regardless (see build_entity).
+
+Commands (stdin)
+    {"protocolVersion":1,"op":"config","generation":7,
+     "url":"https://192.168.1.77","username":"admin","password":"...",
+     "verifyTls":false}
+        Connect, or reconnect with new credentials. The password arrives here
+        rather than in argv because /proc/<pid>/cmdline is readable by every
+        process running as this user.
+    {"op":"command","entity_id":"light.<uuid>","command":"on",
+     "value":40,"tag":"..."}
+    {"op":"refresh"}       re-poll every control right away
+    {"op":"registries"}    re-send the rooms list
+    {"op":"disconnect","generation":8}
+    {"op":"camera_config","url":"https://cam.local/mjpg/video.cgi",
+     "username":"...","password":"...","verifyTls":false,
+     "framePath":"/home/user/.config/omarchy/loxone/camera.jpg"}
+        Independent of the Miniserver connection — a camera can be configured
+        with or without one. Only records credentials; does not by itself
+        start pulling frames (see camera_resume) unless a viewer already has
+        the stream open when the config changes. See CameraWorker for the
+        stream itself.
+    {"op":"camera_resume"}   start pulling frames — sent when a viewer (the
+                              popover, or Settings' Camera tab) opens
+    {"op":"camera_pause"}    stop pulling frames — sent when the last viewer
+                              closes, so an unwatched camera does not run
+                              its network and encoder cost for nothing
+    {"op":"camera_disconnect"}
+    {"op":"shutdown"}
+
+Events (stdout)
+    Every event includes protocolVersion; the Miniserver-connection events
+    additionally carry generation (the camera has its own independent
+    lifecycle, so its events do not).
+    {"ev":"phase","phase":"idle|connecting|connected|error",
+     "error":"...","errorKind":"connection|synchronization|credential|protocol"}
+    {"ev":"states","entities":[...]}          full snapshot, replaces the model
+    {"ev":"state_changed","entity":{...}}     single entity changed
+    {"ev":"registries","rooms":[{"area_id":...,"name":...}]}
+    {"ev":"result","tag":"...","ok":true,"error":"...",
+     "errorKind":"command"}
+    {"ev":"camera","status":"idle|connecting|streaming|error","error":"..."}
+        The frame itself is not on the wire — CameraWorker writes it straight
+        to `framePath`; the shell rereads that file on its own timer. NDJSON
+        stdout is one JSON object per *line*, which is a bad transport for a
+        binary JPEG, and the shell already knows how to reload a local file.
+    {"ev":"log","level":"info|warn","msg":"..."}
+
+Flags
+    --demo      a self-contained fake house, no Miniserver needed; see
+                DemoHouse.
+"""
+
+import base64
+import hashlib
+import hmac
+import http.client
+import json
+import os
+import queue
+import random
+import re
+import socket
+import ssl
+import struct
+import sys
+import threading
+import time
+import urllib.parse
+import uuid as uuidlib
+
+sys.dont_write_bytecode = True
+
+USER_AGENT = "loxone-omarchy-bridge/1"
+PROTOCOL_VERSION = 1
+
+REQUEST_TIMEOUT = 4.0
+POLL_INTERVAL = 2.5
+
+BACKOFF_START = 1.0
+BACKOFF_MAX = 30.0
+
+
+def now():
+    return time.monotonic()
+
+
+class LoxoneError(Exception):
+    """Stable transport error exposed to the bridge lifecycle."""
+
+
+# --------------------------------------------------------------------------
+# URL handling
+# --------------------------------------------------------------------------
+
+SCHEME_TLS = {"https": True, "http": False}
+
+
+def parse_miniserver_url(raw_url):
+    """Validate and split a Miniserver URL into (host, port, use_tls).
+
+    Mirrors the discipline of a browser address bar: no scheme means TLS
+    (never guess http, which would put a password on the wire in the clear),
+    only http/https are accepted, and credentials embedded in the URL are
+    rejected rather than silently stripped.
+    """
+    text = str(raw_url or "").strip()
+    if not text:
+        raise LoxoneError("no Miniserver URL configured")
+    try:
+        parts = urllib.parse.urlsplit(text)
+        if not parts.scheme or not parts.netloc:
+            parts = urllib.parse.urlsplit("https://" + text.lstrip("/"))
+        if parts.scheme not in SCHEME_TLS:
+            raise LoxoneError(
+                "unsupported scheme %r — use http:// or https://" % parts.scheme)
+        if not parts.hostname:
+            raise LoxoneError("no host in URL: %s" % text)
+        if parts.username or parts.password:
+            raise LoxoneError("credentials aren't allowed in the Miniserver URL")
+        port = parts.port
+    except ValueError as exc:
+        raise LoxoneError("invalid Miniserver URL: %s" % exc) from exc
+    use_tls = SCHEME_TLS[parts.scheme]
+    if port is None:
+        port = 443 if use_tls else 80
+    return parts.hostname, port, use_tls
+
+
+# --------------------------------------------------------------------------
+# HTTP transport
+# --------------------------------------------------------------------------
+
+
+def redact(text, password):
+    if password:
+        text = text.replace(password, "[redacted]")
+    return text
+
+
+class LoxoneClient:
+    """A keep-alive HTTP(S) client for one Miniserver connection.
+
+    One instance is used sequentially by a single thread (the poller or the
+    command worker each own one) — http.client connections are not
+    thread-safe, so nothing here needs to be.
+    """
+
+    def __init__(self, host, port, use_tls, username, password, verify_tls):
+        self.host = host
+        self.port = port
+        self.use_tls = use_tls
+        self.username = username
+        self.password = password
+        self.verify_tls = verify_tls
+        self._conn = None
+        auth = base64_basic(username, password)
+        self._headers = {"Authorization": "Basic " + auth, "User-Agent": USER_AGENT}
+
+    def _open(self):
+        if self.use_tls:
+            ctx = ssl.create_default_context()
+            if not self.verify_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            self._conn = http.client.HTTPSConnection(
+                self.host, self.port, timeout=REQUEST_TIMEOUT, context=ctx)
+        else:
+            self._conn = http.client.HTTPConnection(
+                self.host, self.port, timeout=REQUEST_TIMEOUT)
+
+    def get(self, path, _redirected=False):
+        """GET `path`, returning (status, body_text). Retries the connection
+        once on a network error before giving up."""
+        for attempt in (0, 1):
+            try:
+                if self._conn is None:
+                    self._open()
+                self._conn.request("GET", path, headers=self._headers)
+                resp = self._conn.getresponse()
+                body = resp.read()
+                status = resp.status
+            except (http.client.HTTPException, OSError, ssl.SSLError) as exc:
+                self.close()
+                if attempt == 0:
+                    continue
+                raise LoxoneError(redact(str(exc), self.password)) from exc
+
+            if status in (301, 302, 303, 307, 308) and not _redirected:
+                # Miniserver Gen 2 redirects local requests to a cloud DynDNS
+                # URL. Following it sends Basic-auth credentials meant for the
+                # local Miniserver to a different host, so only same-host
+                # redirects (a path change) are followed.
+                location = resp.getheader("Location") or ""
+                target = urllib.parse.urlsplit(location)
+                if target.hostname and target.hostname != self.host:
+                    raise LoxoneError(
+                        "Blocked a redirect to a different host (%s). If "
+                        "you're using a local IP, check the Miniserver's "
+                        "network settings." % target.hostname)
+                new_path = target.path or path
+                if target.query:
+                    new_path += "?" + target.query
+                return self.get(new_path, _redirected=True)
+
+            return status, body.decode("utf-8", "replace")
+        raise LoxoneError("request failed after retry")
+
+    def close(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+
+def base64_basic(username, password):
+    return base64.b64encode(("%s:%s" % (username, password)).encode("utf-8")).decode("ascii")
+
+
+# --------------------------------------------------------------------------
+# Structure / control classification
+# --------------------------------------------------------------------------
+
+
+def domain_for_type(control_type):
+    """Map a Loxone control type to one of the panel's domains.
+
+    Loxone does not negotiate capabilities through a feature bitmask the way
+    Home Assistant does — what a control can do follows from its type, which
+    is exactly what this function is for. Anything not recognized falls back
+    to a state-only sensor, same as an unmapped Home Assistant domain would.
+    """
+    t = str(control_type or "").lower()
+    if "lightcontroller" in t or t == "dimmer" or "colorpicker" in t:
+        return "light"
+    if t == "switch":
+        return "switch"
+    if "jalousie" in t or "gate" in t:
+        return "cover"
+    if "iroomcontroller" in t:
+        return "climate"
+    if "lock" in t:
+        return "lock"
+    if t == "pushbutton":
+        return "scene"
+    if any(key in t for key in ("presence", "motion", "smoke", "alarm")):
+        return "binary_sensor"
+    return "sensor"
+
+
+def extract_unit(details):
+    """Pull the unit suffix off a Loxone printf-style format string, e.g.
+    "%.1f°C" -> "°C". The format is the most accurate source available; a
+    fixed lookup table by device class would only guess."""
+    if not isinstance(details, dict):
+        return ""
+    for key in ("format", "actualFormat"):
+        fmt = details.get(key)
+        if not isinstance(fmt, str):
+            continue
+        match = re.search(r"%[-+0-9. ]*[dfs]", fmt)
+        if not match:
+            continue
+        suffix = fmt[match.end():].strip()
+        if suffix:
+            return suffix
+    return ""
+
+
+class RegistryEntry:
+    __slots__ = ("entity_id", "uuid", "control_type", "domain", "name",
+                 "room_id", "unit", "light_off_verb")
+
+    def __init__(self, entity_id, uuid, control_type, domain, name, room_id, unit,
+                 light_off_verb=None):
+        self.entity_id = entity_id
+        self.uuid = uuid
+        self.control_type = control_type
+        self.domain = domain
+        self.name = name
+        self.room_id = room_id
+        self.unit = unit
+        self.light_off_verb = light_off_verb
+
+
+def light_controller_off_verb(ctrl_uuid, ctrl):
+    """A LightControllerV2's own on/off and setMood commands are silently
+    accepted (HTTP 200) but were live-verified against a real Miniserver to
+    have *no effect at all* on an RGB circuit's actual output — on works
+    (it restores the last mood), but nothing sent to the controller itself
+    turns the light back off, including the system "Aus" mood (778). The
+    only command that was live-verified to actually work is an explicit
+    zero-brightness color command (`hsv(0,0,0)`) sent straight to the
+    controller's own ColorPickerV2 sub-control, bypassing the mood system
+    entirely. See root AGENTS.md's design notes for the full story — this is
+    not a guess, it was found by testing every plausible command against the
+    real fixture and watching what actually happened physically."""
+    sub_controls = ctrl.get("subControls")
+    if not isinstance(sub_controls, dict):
+        return None
+    prefix = ctrl_uuid + "/"
+    for sub in sub_controls.values():
+        if not isinstance(sub, dict):
+            continue
+        sub_type = sub.get("type")
+        if not isinstance(sub_type, str) or sub_type.lower() not in ("colorpickerv2", "colorpicker"):
+            continue
+        action = sub.get("uuidAction")
+        if not isinstance(action, str) or not action.startswith(prefix):
+            continue
+        suffix = action[len(prefix):]
+        if suffix:
+            return "%s/hsv(0,0,0)" % suffix
+    return None
+
+
+def build_registry(structure):
+    """Turn a parsed LoxApp3.json into (registry, rooms).
+
+    registry: entity_id -> RegistryEntry
+    rooms: [{"area_id": uuid, "name": ...}]
+    """
+    rooms_raw = structure.get("rooms") if isinstance(structure, dict) else None
+    rooms = []
+    if isinstance(rooms_raw, dict):
+        for uuid, room in rooms_raw.items():
+            if isinstance(room, dict) and isinstance(room.get("name"), str):
+                rooms.append({"area_id": uuid, "name": room["name"]})
+
+    controls = structure.get("controls") if isinstance(structure, dict) else None
+    registry = {}
+    if isinstance(controls, dict):
+        for uuid, ctrl in controls.items():
+            if not isinstance(ctrl, dict):
+                continue
+            name = ctrl.get("name")
+            control_type = ctrl.get("type")
+            if not isinstance(name, str) or not isinstance(control_type, str):
+                continue
+            domain = domain_for_type(control_type)
+            room_id = ctrl.get("room") if isinstance(ctrl.get("room"), str) else ""
+            unit = extract_unit(ctrl.get("details"))
+            entity_id = "%s.%s" % (domain, uuid)
+            light_off_verb = (light_controller_off_verb(uuid, ctrl)
+                               if "lightcontroller" in control_type.lower() else None)
+            registry[entity_id] = RegistryEntry(
+                entity_id, uuid, control_type, domain, name, room_id, unit,
+                light_off_verb=light_off_verb)
+    return registry, rooms
+
+
+def build_light_controller_watch(structure):
+    """entity_id -> its `activeMoods` state UUID, for every LightControllerV2
+    control. That state is the only reliable on/off signal that control type
+    has — see build_entity's docstring — and it only exists on the
+    Miniserver's push channel, not in any HTTP polling response, which is
+    what LivePushThread subscribes to it for."""
+    controls = structure.get("controls") if isinstance(structure, dict) else None
+    watch = {}
+    if not isinstance(controls, dict):
+        return watch
+    for uuid, ctrl in controls.items():
+        if not isinstance(ctrl, dict):
+            continue
+        control_type = ctrl.get("type")
+        if not isinstance(control_type, str) or "lightcontroller" not in control_type.lower():
+            continue
+        states = ctrl.get("states")
+        active_moods = states.get("activeMoods") if isinstance(states, dict) else None
+        if isinstance(active_moods, str):
+            entity_id = "light.%s" % uuid
+            watch[entity_id] = active_moods
+    return watch
+
+
+# --------------------------------------------------------------------------
+# State parsing
+# --------------------------------------------------------------------------
+
+_ATTR_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"')
+
+
+def parse_all_response(xml_text):
+    """`/dev/sps/io/<uuid>/all` answers a `<LL ...>` element — self-closing
+    for a simple control, but for some (LightControllerV2's per-channel
+    breakdown, e.g.) with nested `<output nr="..." value="..."/>` children
+    that reuse attribute names like `value`. The outer `<LL>`'s own
+    attributes are what the rest of this module means by "the control's
+    state" and always appear first in the raw text; a naive dict-of-all-
+    matches build (last occurrence wins) would silently let the last child's
+    `value` clobber the real one. First occurrence wins here instead."""
+    attrs = {}
+    for name, val in _ATTR_RE.findall(xml_text or ""):
+        attrs.setdefault(name, val)
+    return attrs
+
+
+def as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_entity(entry, attrs, light_hints=None):
+    """RegistryEntry + raw `/all` attributes -> the entity dict the panel
+    understands. Best-effort by design: an attribute name Loxone did not
+    report is simply absent from `attributes`, never invented.
+
+    `light_hints` (entity_id -> "on"/"off") overrides LightControllerV2's own
+    on/off reading — verified live against a real Miniserver, that control's
+    `/all` `value` does not change with its actual state at all (it is a
+    mood-list encoding this endpoint apparently never refreshes), so trusting
+    it is not a rough approximation, it is simply wrong. The plugin's own
+    last command for that control is the only signal available without the
+    Miniserver's push-only state protocol (see the module docstring) — see
+    CommandWorker for where the hint gets set."""
+    code = attrs.get("Code")
+    unavailable = code is not None and code != "200"
+    base_attributes = {"friendly_name": entry.name}
+    if entry.room_id:
+        base_attributes["area_id"] = entry.room_id
+
+    if unavailable:
+        return {"entity_id": entry.entity_id, "state": "unavailable",
+                "attributes": base_attributes, "area_id": entry.room_id}
+
+    value = as_float(attrs.get("value"))
+    domain = entry.domain
+    attributes = dict(base_attributes)
+    state = "unknown"
+
+    if domain == "light":
+        is_dimmer = entry.control_type.lower() in ("dimmer",) \
+            or "colorpicker" in entry.control_type.lower()
+        if is_dimmer and value is not None:
+            attributes["brightness"] = max(0.0, min(100.0, value))
+            state = "on" if value > 0 else "off"
+        elif light_hints is not None and entry.entity_id in light_hints:
+            # Our own last command outranks the read once we have one — see
+            # the docstring above for why the read cannot be trusted once
+            # proven stale on a given Miniserver.
+            state = light_hints[entry.entity_id]
+        else:
+            # No command sent yet this session, so no hint exists. Fall back
+            # to the reference `lox` CLI's own off-detection (`cmd_mood`) —
+            # on Miniserver firmware/configurations where this value field
+            # does track mood state, this is a real first-read signal rather
+            # than a shot in the dark; where it does not (verified true for
+            # at least one real deployment), it will simply be replaced by a
+            # hint the moment a command is sent through the panel.
+            raw_value = attrs.get("value") or ""
+            is_off = raw_value == "0" or raw_value.startswith("200002700")
+            state = "off" if is_off else "on"
+    elif domain == "switch":
+        state = "on" if (value is not None and value != 0) else "off"
+    elif domain == "lock":
+        state = "locked" if (value is not None and value != 0) else "unlocked"
+    elif domain == "cover":
+        pos = as_float(attrs.get("StatePos"))
+        if pos is not None:
+            attributes["position"] = max(0.0, min(100.0, pos * 100.0))
+            state = "open" if pos > 0.005 else "closed"
+        elif value is not None:
+            state = "open" if value != 0 else "closed"
+    elif domain == "climate":
+        for key, target in (
+            ("actual", "current_temperature"), ("target", "temperature"),
+            ("comfort", "temperature"),
+        ):
+            for attr_name, attr_value in attrs.items():
+                if key in attr_name.lower():
+                    parsed = as_float(attr_value)
+                    if parsed is not None:
+                        attributes.setdefault(target, parsed)
+        state = "auto"
+    elif domain == "scene":
+        state = "unknown"
+    elif domain == "binary_sensor":
+        state = "on" if (value is not None and value != 0) else "off"
+    else:
+        raw = attrs.get("value")
+        state = raw if raw is not None else "unknown"
+        if entry.unit:
+            attributes["unit_of_measurement"] = entry.unit
+
+    return {"entity_id": entry.entity_id, "state": state, "attributes": attributes,
+            "area_id": entry.room_id}
+
+
+def poll_one(client, entry, light_hints=None):
+    status, body = client.get("/dev/sps/io/%s/all" % entry.uuid)
+    attrs = parse_all_response(body) if status == 200 else {"Code": str(status)}
+    return build_entity(entry, attrs, light_hints)
+
+
+# A Miniserver with a couple hundred controls (not unusual for a whole house)
+# polled one control at a time over a single connection is the difference
+# between a ~2-3s cycle and one running well past the interval meant to pace
+# it, which reads as "the panel is out of sync" even though every poll is
+# individually correct — it just hasn't gotten around to a given control yet.
+# Splitting the registry across a handful of connections cuts that almost
+# linearly without needing the bridge to know which controls the panel
+# actually shows right now.
+POLL_WORKERS = 6
+
+
+def poll_all(cfg, registry, light_hints=None):
+    """Poll every control in `registry`, split across POLL_WORKERS connections.
+    Raises LoxoneError if any of them failed — a partial, silently-incomplete
+    snapshot is worse than a clean retry of the whole thing."""
+    entries = list(registry.values())
+    if not entries:
+        return []
+    worker_count = max(1, min(POLL_WORKERS, len(entries)))
+    chunks = [entries[i::worker_count] for i in range(worker_count)]
+    results = [None] * worker_count
+    errors = [None] * worker_count
+
+    def run_chunk(index, chunk):
+        client = LoxoneClient(**cfg)
+        try:
+            results[index] = [poll_one(client, entry, light_hints) for entry in chunk]
+        except LoxoneError as exc:
+            errors[index] = exc
+        finally:
+            client.close()
+
+    threads = [threading.Thread(target=run_chunk, args=(i, chunk), daemon=True)
+               for i, chunk in enumerate(chunks)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    for error in errors:
+        if error is not None:
+            raise error
+
+    entities = []
+    for chunk_result in results:
+        entities.extend(chunk_result)
+    return entities
+
+
+def fetch_structure(client):
+    status, body = client.get("/data/LoxApp3.json")
+    if status != 200:
+        raise LoxoneError("could not read the Miniserver structure (HTTP %d)" % status)
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise LoxoneError("Miniserver structure is not valid JSON") from exc
+
+
+# --------------------------------------------------------------------------
+# Command translation
+# --------------------------------------------------------------------------
+
+# LightControllerV2/LightController is a mood controller, not a relay: a
+# plain "on" restores the last active mood (the same trick the reference
+# `lox` CLI uses before setting a mood — see `ensure_light_on_for_mood`), but
+# there is no plain "off" that reliably does anything. Mood 778 ("Aus") looks
+# like the system-defined off mood on paper and is silently accepted (HTTP
+# 200), but live testing against a real Miniserver with an RGB circuit found
+# it has no physical effect either — see `light_controller_off_verb`, which
+# targets the controller's ColorPickerV2 sub-control directly and is tried
+# first. This is now only the fallback for a LightControllerV2 that has no
+# such sub-control to target (unverified against real hardware — better than
+# nothing, not proven to work).
+LIGHT_CONTROLLER_OFF = "setMood/778"
+
+
+def translate_command(entry, command, value):
+    """UI-level command (from Model.js) -> the verb `/jdev/sps/io/<uuid>/...`
+    expects, following each control type's real command surface."""
+    domain = entry.domain
+    t = entry.control_type.lower()
+
+    if domain in ("light", "switch", "lock"):
+        if command == "on":
+            return "on"
+        if command == "off":
+            if domain == "light" and "lightcontroller" in t:
+                return entry.light_off_verb or LIGHT_CONTROLLER_OFF
+            return "off"
+        if command == "set_brightness" and domain == "light":
+            level = as_float(value)
+            if level is None:
+                raise LoxoneError("brightness needs a numeric value")
+            return "%.0f" % max(0.0, min(100.0, level))
+    elif domain == "cover":
+        is_gate = "gate" in t
+        if command == "open_cover":
+            return "open" if is_gate else "FullUp"
+        if command == "close_cover":
+            return "close" if is_gate else "FullDown"
+        if command == "stop_cover":
+            return "stop" if is_gate else "off"
+    elif domain == "climate":
+        if command == "set_temperature":
+            target = as_float(value)
+            if target is None:
+                raise LoxoneError("set_temperature needs a numeric value")
+            return "setComfortTemperature/%.1f" % target
+    elif domain == "scene":
+        if command == "activate":
+            return "pulse"
+
+    raise LoxoneError("command %r is not supported for %s" % (command, domain))
+
+
+def execute_command(client, registry, entity_id, command, value):
+    entry = registry.get(entity_id)
+    if entry is None:
+        return False, "Unknown entity %s" % entity_id
+    try:
+        verb = translate_command(entry, command, value)
+    except LoxoneError as exc:
+        return False, str(exc)
+    try:
+        status, body = client.get("/jdev/sps/io/%s/%s" % (entry.uuid, verb))
+    except LoxoneError as exc:
+        return False, str(exc)
+    if status != 200:
+        return False, "Miniserver rejected the command (HTTP %d)" % status
+    try:
+        parsed = json.loads(body)
+        code = str(parsed.get("LL", {}).get("Code", "200"))
+    except ValueError:
+        code = "200"
+    if code != "200":
+        return False, "Miniserver rejected the command (code %s)" % code
+    return True, ""
+
+
+# --------------------------------------------------------------------------
+# Demo house
+# --------------------------------------------------------------------------
+
+DEMO_ROOMS = [
+    {"area_id": "room-living", "name": "Living Room"},
+    {"area_id": "room-kitchen", "name": "Kitchen"},
+    {"area_id": "room-garage", "name": "Garage"},
+]
+
+# Ids also live in Model.js's DEMO_DEFAULT_FAVORITES; test_model.js checks
+# that list stays a subset of this one.
+DEMO_FIXTURE = [
+    ("light.5b93f8a1-0001-0001-0000000000001", "Dimmer", "Living Room Lamp",
+     "room-living", {"value": 70.0}),
+    ("switch.5b93f8a1-0002-0001-0000000000002", "Switch", "Coffee Maker",
+     "room-kitchen", {"value": 0.0}),
+    ("climate.5b93f8a1-0003-0001-0000000000003", "IRoomControllerV2",
+     "Living Room Thermostat", "room-living",
+     {"tempActual": 21.4, "tempTarget": 22.0}),
+    ("scene.5b93f8a1-0004-0001-0000000000004", "Pushbutton", "Movie Night",
+     "room-living", {}),
+    ("light.5b93f8a1-0005-0001-0000000000005", "Dimmer", "Kitchen Pendant Light",
+     "room-kitchen", {"value": 55.0}),
+    ("sensor.5b93f8a1-0006-0001-0000000000006", "InfoOnlyAnalog",
+     "Kitchen Temperature", "room-kitchen", {"value": 22.3},
+     {"format": "%.1f°C"}),
+    ("cover.5b93f8a1-0007-0001-0000000000007", "Jalousie", "Garage Door",
+     "room-garage", {"StatePos": 0.0}),
+    ("lock.5b93f8a1-0008-0001-0000000000008", "SmartLock",
+     "Garage Side Door Lock", "room-garage", {"value": 1.0}),
+    ("switch.5b93f8a1-0009-0001-0000000000009", "Switch", "Guest Mode",
+     "room-kitchen", {"value": 0.0}),
+    ("binary_sensor.5b93f8a1-0010-0001-0000000000010", "PresenceDetector",
+     "Garage Motion", "room-garage", {"value": 0.0}),
+]
+
+
+class DemoHouse:
+    """A fake Miniserver: real structure/state/command shapes, so everything
+    above this point is exercised for real rather than stubbed out, plus a
+    slow drift so the panel's live-update path has something to show even
+    with no Miniserver on the network."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.registry = {}
+        self.rooms = list(DEMO_ROOMS)
+        self._values = {}
+        for fixture in DEMO_FIXTURE:
+            entity_id, control_type, name, room_id, values = fixture[:5]
+            details = fixture[5] if len(fixture) > 5 else {}
+            domain = domain_for_type(control_type)
+            uuid = entity_id.split(".", 1)[1]
+            unit = extract_unit(details)
+            self.registry[entity_id] = RegistryEntry(
+                entity_id, uuid, control_type, domain, name, room_id, unit)
+            self._values[entity_id] = dict(values)
+
+    def snapshot(self):
+        with self._lock:
+            entities = []
+            for entity_id, entry in self.registry.items():
+                attrs = self._attrs_for(entry, self._values[entity_id])
+                entities.append(build_entity(entry, attrs))
+            return entities
+
+    def _attrs_for(self, entry, values):
+        attrs = {"Code": "200"}
+        for key, val in values.items():
+            attrs[key] = "%s" % val
+        return attrs
+
+    def apply_command(self, entity_id, command, value):
+        with self._lock:
+            entry = self.registry.get(entity_id)
+            if entry is None:
+                return False, "Unknown entity %s" % entity_id
+            values = self._values[entity_id]
+            domain = entry.domain
+            if domain in ("light", "switch") and command in ("on", "off"):
+                values["value"] = 100.0 if (command == "on" and domain == "light") \
+                    else (1.0 if command == "on" else 0.0)
+            elif domain == "lock" and command in ("on", "off"):
+                values["value"] = 1.0 if command == "on" else 0.0
+            elif domain == "light" and command == "set_brightness":
+                level = as_float(value)
+                if level is None:
+                    return False, "brightness needs a numeric value"
+                values["value"] = max(0.0, min(100.0, level))
+            elif domain == "cover" and command in (
+                    "open_cover", "close_cover", "stop_cover"):
+                pos = as_float(values.get("StatePos")) or 0.0
+                if command == "open_cover":
+                    values["StatePos"] = 1.0
+                elif command == "close_cover":
+                    values["StatePos"] = 0.0
+                else:
+                    values["StatePos"] = pos
+            elif domain == "climate" and command == "set_temperature":
+                target = as_float(value)
+                if target is None:
+                    return False, "set_temperature needs a numeric value"
+                values["tempTarget"] = target
+            elif domain == "scene" and command == "activate":
+                pass
+            else:
+                return False, "command %r is not supported for %s" % (command, domain)
+            return True, ""
+
+    def tick(self):
+        with self._lock:
+            thermostat = self._values.get(
+                "climate.5b93f8a1-0003-0001-0000000000003")
+            if thermostat:
+                current = float(thermostat.get("tempActual", 21.0))
+                target = float(thermostat.get("tempTarget", 22.0))
+                step = 0.1 if current < target else -0.1
+                thermostat["tempActual"] = round(
+                    current + step + random.uniform(-0.04, 0.04), 1)
+            sensor = self._values.get(
+                "sensor.5b93f8a1-0006-0001-0000000000006")
+            if sensor and thermostat:
+                sensor["value"] = round(
+                    thermostat["tempActual"] + random.uniform(0.4, 1.2), 1)
+            motion = self._values.get(
+                "binary_sensor.5b93f8a1-0010-0001-0000000000010")
+            if motion and random.random() < 0.15:
+                motion["value"] = 0.0 if motion.get("value") else 1.0
+
+
+# --------------------------------------------------------------------------
+# Poller / command worker threads
+# --------------------------------------------------------------------------
+
+
+class PollerThread(threading.Thread):
+    """Owns one Miniserver (or demo house) connection: fetches the structure
+    once, then polls every control on an interval. Every message it posts
+    carries the epoch it was started with, so the main loop can silently drop
+    anything left over from a connection it has already replaced."""
+
+    def __init__(self, epoch, out_queue, cfg=None, demo_house=None, light_hints=None):
+        super().__init__(daemon=True)
+        self.epoch = epoch
+        self.out_queue = out_queue
+        self.cfg = cfg
+        self.demo_house = demo_house
+        self.light_hints = light_hints
+        self.stop_event = threading.Event()
+
+    def run(self):
+        light_watch = {}
+        try:
+            if self.demo_house is not None:
+                registry = self.demo_house.registry
+                rooms = self.demo_house.rooms
+                entities = self.demo_house.snapshot()
+            else:
+                structure_client = LoxoneClient(**self.cfg)
+                try:
+                    structure = fetch_structure(structure_client)
+                finally:
+                    structure_client.close()
+                registry, rooms = build_registry(structure)
+                if not registry:
+                    raise LoxoneError(
+                        "the Miniserver structure has no recognizable controls")
+                light_watch = build_light_controller_watch(structure)
+                entities = poll_all(self.cfg, registry, self.light_hints)
+        except LoxoneError as exc:
+            self.out_queue.put(("connect_error", self.epoch, str(exc)))
+            return
+        except Exception as exc:  # noqa: BLE001 — surfaced, not swallowed
+            self.out_queue.put(("connect_error", self.epoch, str(exc)))
+            return
+
+        self.out_queue.put(
+            ("connected", self.epoch, registry, rooms, entities, light_watch))
+
+        while not self.stop_event.wait(POLL_INTERVAL):
+            try:
+                if self.demo_house is not None:
+                    self.demo_house.tick()
+                    entities = self.demo_house.snapshot()
+                else:
+                    entities = poll_all(self.cfg, registry, self.light_hints)
+            except LoxoneError as exc:
+                self.out_queue.put(("poll_error", self.epoch, str(exc)))
+                break
+            except Exception as exc:  # noqa: BLE001
+                self.out_queue.put(("poll_error", self.epoch, str(exc)))
+                break
+            if self.stop_event.is_set():
+                break
+            self.out_queue.put(("poll_result", self.epoch, entities))
+
+
+class CommandWorker(threading.Thread):
+    """Runs Miniserver commands on its own connection, sequentially, so a
+    burst of button presses cannot starve the poller (or each other) and a
+    slow command cannot block the main loop from reading the next one."""
+
+    def __init__(self, epoch, out_queue, cfg=None, demo_house=None, light_hints=None):
+        super().__init__(daemon=True)
+        self.epoch = epoch
+        self.out_queue = out_queue
+        self.cfg = cfg
+        self.demo_house = demo_house
+        self.light_hints = light_hints if light_hints is not None else {}
+        self.jobs = queue.Queue()
+
+    def submit(self, entity_id, command, value, tag, registry):
+        self.jobs.put((entity_id, command, value, tag, registry))
+
+    def stop(self):
+        self.jobs.put(None)
+
+    def run(self):
+        client = None if self.demo_house is not None else LoxoneClient(**self.cfg)
+        try:
+            while True:
+                job = self.jobs.get()
+                if job is None:
+                    break
+                entity_id, command, value, tag, registry = job
+                try:
+                    if self.demo_house is not None:
+                        ok, error = self.demo_house.apply_command(
+                            entity_id, command, value)
+                    else:
+                        ok, error = execute_command(
+                            client, registry, entity_id, command, value)
+                except Exception as exc:  # noqa: BLE001
+                    ok, error = False, str(exc)
+                self.out_queue.put(
+                    ("command_result", self.epoch, tag, ok, error))
+                if ok:
+                    self._record_hint(entity_id, command, registry)
+                    self._confirm_entity(entity_id, registry, client)
+        finally:
+            if client is not None:
+                client.close()
+
+    def _record_hint(self, entity_id, command, registry):
+        """LightControllerV2's own on/off reading is provably unreliable (see
+        build_entity) — the command we just successfully sent is the only
+        signal that exists without the Miniserver's push-only state protocol.
+        Scoped to that one control type: Dimmer/Switch/lock all read
+        correctly from the poll on their own and must not be second-guessed
+        by a stale hint from an old command."""
+        if command not in ("on", "off") or self.demo_house is not None:
+            return
+        entry = registry.get(entity_id)
+        if entry is None or entry.domain != "light":
+            return
+        if "lightcontroller" not in entry.control_type.lower():
+            return
+        self.light_hints[entity_id] = command
+
+    def _confirm_entity(self, entity_id, registry, client):
+        """Re-read the control right after a command that just succeeded, so
+        the row updates immediately instead of waiting for the next scheduled
+        poll (up to POLL_INTERVAL away) to notice its own effect. Best-effort:
+        a failure here just means the scheduled poll catches it as usual."""
+        try:
+            if self.demo_house is not None:
+                entity = next((e for e in self.demo_house.snapshot()
+                              if e["entity_id"] == entity_id), None)
+            else:
+                entry = registry.get(entity_id)
+                if entry is None:
+                    return
+                entity = poll_one(client, entry, self.light_hints)
+            if entity is not None:
+                self.out_queue.put(("entity_result", self.epoch, entity))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# --------------------------------------------------------------------------
+# Camera streaming
+# --------------------------------------------------------------------------
+#
+# A camera stream is not a Loxone control — it's an arbitrary HTTP(S) URL
+# behind Basic auth, most often an IP camera's own CGI endpoint (this is
+# exactly how Axis cameras, among others, expose both a snapshot and an MJPEG
+# feed). One "stream URL" field has to work for both shapes a camera answers
+# with, so the worker below sniffs the response's Content-Type rather than
+# asking the user which kind they have:
+#   multipart/x-mixed-replace  -> a real MJPEG stream: read frames as they
+#                                  arrive, for as long as the connection stays
+#                                  open.
+#   image/* (anything else)    -> a plain snapshot endpoint: read the one
+#                                  image, then re-request it on an interval.
+# Either way, the decoded JPEG bytes are written straight to a local file —
+# see the module docstring for why that, and not the NDJSON channel, carries
+# the frame.
+
+CAMERA_TIMEOUT = 10.0
+CAMERA_RECONNECT_DELAY = 3.0
+CAMERA_SNAPSHOT_INTERVAL = 1.0
+# A malformed or non-MJPEG multipart stream must not be allowed to grow the
+# read buffer without bound while it waits for a boundary that never comes.
+CAMERA_MAX_BUFFER = 8 * 1024 * 1024
+
+
+def parse_stream_url(raw_url):
+    """Like parse_miniserver_url, but a camera's path (and query string) is
+    the whole point — `/axis-cgi/mjpg/video.cgi`, not a fixed API root — so
+    it is kept rather than discarded."""
+    text = str(raw_url or "").strip()
+    if not text:
+        raise LoxoneError("no camera stream URL configured")
+    try:
+        parts = urllib.parse.urlsplit(text)
+        if not parts.scheme or not parts.netloc:
+            parts = urllib.parse.urlsplit("https://" + text.lstrip("/"))
+        if parts.scheme not in SCHEME_TLS:
+            raise LoxoneError(
+                "unsupported scheme %r — use http:// or https://" % parts.scheme)
+        if not parts.hostname:
+            raise LoxoneError("no host in camera stream URL: %s" % text)
+        if parts.username or parts.password:
+            raise LoxoneError("credentials aren't allowed in the camera stream URL")
+        port = parts.port
+    except ValueError as exc:
+        raise LoxoneError("invalid camera stream URL: %s" % exc) from exc
+    use_tls = SCHEME_TLS[parts.scheme]
+    if port is None:
+        port = 443 if use_tls else 80
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    return parts.hostname, port, use_tls, path
+
+
+def _extract_boundary(content_type):
+    match = re.search(r'boundary="?([^";]+)"?', content_type, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _extract_mjpeg_frame(buf, boundary_bytes):
+    """Pull one complete frame out of `buf` if there is one yet, returning
+    (frame_or_None, remaining_buf)."""
+    start = buf.find(boundary_bytes)
+    if start == -1:
+        if len(buf) > CAMERA_MAX_BUFFER:
+            return None, buf[-CAMERA_MAX_BUFFER:]
+        return None, buf
+    header_end = buf.find(b"\r\n\r\n", start)
+    if header_end == -1:
+        if len(buf) - start > CAMERA_MAX_BUFFER:
+            return None, buf[start:]
+        return None, buf[start:]
+    header_text = buf[start:header_end].decode("latin-1", "replace")
+    length_match = re.search(r"Content-Length:\s*(\d+)", header_text, re.IGNORECASE)
+    frame_start = header_end + 4
+    if length_match:
+        length = int(length_match.group(1))
+        frame_end = frame_start + length
+        if len(buf) < frame_end:
+            return None, buf[start:]
+        return buf[frame_start:frame_end], buf[frame_end:]
+    # No declared length — fall back to the next boundary marking the end.
+    next_boundary = buf.find(boundary_bytes, frame_start)
+    if next_boundary == -1:
+        if len(buf) - start > CAMERA_MAX_BUFFER:
+            return None, buf[start:]
+        return None, buf[start:]
+    frame = buf[frame_start:next_boundary].rstrip(b"\r\n")
+    return frame, buf[next_boundary:]
+
+
+class CameraWorker(threading.Thread):
+    """Owns one camera connection: reconnects on any error, with a fixed
+    delay rather than the Miniserver poller's backoff — a camera being briefly
+    unreachable is routine (Wi-Fi hiccup, camera reboot) and worth retrying
+    promptly, not something to back off hard from."""
+
+    def __init__(self, epoch, out_queue, url, username, password, verify_tls,
+                 frame_path):
+        super().__init__(daemon=True)
+        self.epoch = epoch
+        self.out_queue = out_queue
+        self.url = url
+        self.username = username
+        self.password = password
+        self.verify_tls = verify_tls
+        self.frame_path = frame_path
+        self.stop_event = threading.Event()
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                self._connect_and_stream()
+            except LoxoneError as exc:
+                self._status("error", str(exc))
+            except Exception as exc:  # noqa: BLE001 — surfaced, not swallowed
+                self._status("error", str(exc))
+            if self.stop_event.wait(CAMERA_RECONNECT_DELAY):
+                break
+
+    def _status(self, status, error=""):
+        self.out_queue.put(("camera_status", self.epoch, status, error))
+
+    def _open_connection(self, host, port, use_tls):
+        if use_tls:
+            ctx = ssl.create_default_context()
+            if not self.verify_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            return http.client.HTTPSConnection(
+                host, port, timeout=CAMERA_TIMEOUT, context=ctx)
+        return http.client.HTTPConnection(host, port, timeout=CAMERA_TIMEOUT)
+
+    def _connect_and_stream(self):
+        host, port, use_tls, path = parse_stream_url(self.url)
+        headers = {"Authorization": "Basic " + base64_basic(self.username, self.password),
+                   "User-Agent": USER_AGENT}
+        conn = self._open_connection(host, port, use_tls)
+        try:
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                resp.read()
+                raise LoxoneError("camera stream returned HTTP %d" % resp.status)
+            content_type = resp.getheader("Content-Type", "") or ""
+            self._status("streaming")
+            if content_type.lower().startswith("multipart/"):
+                boundary = _extract_boundary(content_type)
+                if not boundary:
+                    raise LoxoneError(
+                        "camera stream is multipart but declares no boundary")
+                self._read_mjpeg(resp, ("--" + boundary).encode("ascii", "ignore"))
+            else:
+                self._read_snapshot_loop(conn, headers, path, resp)
+        finally:
+            conn.close()
+
+    def _read_mjpeg(self, resp, boundary_bytes):
+        buf = b""
+        while not self.stop_event.is_set():
+            # read(), inherited from BufferedIOBase, blocks until the full
+            # amount requested has arrived — exactly wrong for a stream that
+            # sends one small frame at a time with gaps in between. read1()
+            # returns whatever a single underlying read produced, which is
+            # what "the next bit of the stream, whenever it shows up" means.
+            chunk = resp.read1(8192)
+            if not chunk:
+                raise LoxoneError("camera stream closed")
+            buf += chunk
+            while True:
+                frame, buf = _extract_mjpeg_frame(buf, boundary_bytes)
+                if frame is None:
+                    break
+                self._write_frame(frame)
+
+    def _read_snapshot_loop(self, conn, headers, path, first_response):
+        self._write_frame(first_response.read())
+        while not self.stop_event.wait(CAMERA_SNAPSHOT_INTERVAL):
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                resp.read()
+                raise LoxoneError("camera stream returned HTTP %d" % resp.status)
+            self._write_frame(resp.read())
+
+    def _write_frame(self, data):
+        if not data:
+            return
+        tmp_path = self.frame_path + ".tmp"
+        try:
+            with open(tmp_path, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp_path, self.frame_path)
+        except OSError as exc:
+            raise LoxoneError("could not write the camera frame: %s" % exc) from exc
+
+
+# --------------------------------------------------------------------------
+# RSA (public-key encryption only — see the module docstring for why this
+# does not need a third-party crypto library)
+# --------------------------------------------------------------------------
+
+
+class RsaPublicKey:
+    __slots__ = ("n", "e")
+
+    def __init__(self, n, e):
+        self.n = n
+        self.e = e
+
+
+def _der_read_tlv(data, offset):
+    """Read one DER tag-length-value at `offset`, returning
+    (tag, value_bytes, offset_after). Definite-length encoding only — the
+    only kind either OpenSSL or a Miniserver ever emits for a public key."""
+    tag = data[offset]
+    offset += 1
+    length = data[offset]
+    offset += 1
+    if length & 0x80:
+        num_bytes = length & 0x7F
+        if num_bytes == 0:
+            raise LoxoneError("indefinite-length DER is not supported")
+        length = int.from_bytes(data[offset:offset + num_bytes], "big")
+        offset += num_bytes
+    value = data[offset:offset + length]
+    return tag, value, offset + length
+
+
+def parse_rsa_public_key_der(der_bytes):
+    """DER SubjectPublicKeyInfo -> RsaPublicKey. Structure (RFC 5280):
+    SEQUENCE { SEQUENCE { OID, NULL }, BIT STRING { SEQUENCE { INTEGER n,
+    INTEGER e } } } — fixed shape, so this reads exactly that and nothing
+    more general."""
+    try:
+        tag, seq, _ = _der_read_tlv(der_bytes, 0)
+        if tag != 0x30:
+            raise LoxoneError("expected SEQUENCE (SubjectPublicKeyInfo)")
+        _, _, off1 = _der_read_tlv(seq, 0)  # AlgorithmIdentifier — skip
+        tag2, bitstr, _ = _der_read_tlv(seq, off1)
+        if tag2 != 0x03:
+            raise LoxoneError("expected BIT STRING")
+        if not bitstr or bitstr[0] != 0x00:
+            raise LoxoneError("unexpected unused-bits count in BIT STRING")
+        inner = bitstr[1:]
+        tag3, inner_seq, _ = _der_read_tlv(inner, 0)
+        if tag3 != 0x30:
+            raise LoxoneError("expected SEQUENCE (RSAPublicKey)")
+        tag_n, n_bytes, off_n = _der_read_tlv(inner_seq, 0)
+        if tag_n != 0x02:
+            raise LoxoneError("expected INTEGER (modulus)")
+        tag_e, e_bytes, _ = _der_read_tlv(inner_seq, off_n)
+        if tag_e != 0x02:
+            raise LoxoneError("expected INTEGER (exponent)")
+    except (IndexError, ValueError) as exc:
+        raise LoxoneError("malformed RSA public key: %s" % exc) from exc
+    return RsaPublicKey(int.from_bytes(n_bytes, "big"), int.from_bytes(e_bytes, "big"))
+
+
+def parse_rsa_public_key_pem(pem_text):
+    """Loxone answers `/jdev/sys/getPublicKey` with a SubjectPublicKeyInfo
+    mislabeled as a certificate (`-----BEGIN CERTIFICATE-----`) — the label
+    is ignored here for exactly that reason, only the base64 body matters."""
+    b64 = re.sub(r"-----(BEGIN|END)[^-]*-----", "", pem_text)
+    b64 = "".join(b64.split())
+    try:
+        der = base64.b64decode(b64)
+    except (ValueError, TypeError) as exc:
+        raise LoxoneError("could not decode the Miniserver's public key") from exc
+    return parse_rsa_public_key_der(der)
+
+
+def rsa_pkcs1v15_encrypt(pubkey, message):
+    """RSAES-PKCS1-v1_5 encryption (RFC 8017 §7.2.1) — encryption only, which
+    is all the token handshake below needs."""
+    k = (pubkey.n.bit_length() + 7) // 8
+    if len(message) > k - 11:
+        raise LoxoneError("message too long for this RSA key size")
+    ps = bytearray()
+    while len(ps) < k - len(message) - 3:
+        b = os.urandom(1)
+        if b != b"\x00":  # PS bytes must be nonzero, or 0x00 could be
+            ps += b       # mistaken for the padding/message separator
+    em = b"\x00\x02" + bytes(ps) + b"\x00" + message
+    c_int = pow(int.from_bytes(em, "big"), pubkey.e, pubkey.n)
+    return c_int.to_bytes(k, "big")
+
+
+# --------------------------------------------------------------------------
+# Minimal RFC 6455 WebSocket client
+# --------------------------------------------------------------------------
+#
+# Enough to talk to a Miniserver: text/binary messages, transparent ping/pong,
+# no permessage-deflate (never offered), no fragmentation on send (every
+# message this bridge sends is small). No third-party WebSocket library is
+# vendored — see the module docstring.
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+class WebSocketClient:
+    def __init__(self, sock):
+        self.sock = sock
+        self._buf = b""
+
+    @classmethod
+    def connect(cls, host, port, path, use_tls, verify_tls, headers=None, timeout=10.0):
+        raw = socket.create_connection((host, port), timeout=timeout)
+        sock = raw
+        if use_tls:
+            ctx = ssl.create_default_context()
+            if not verify_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(raw, server_hostname=host)
+        try:
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            lines = [
+                "GET %s HTTP/1.1" % path, "Host: %s" % host,
+                "Upgrade: websocket", "Connection: Upgrade",
+                "Sec-WebSocket-Key: %s" % key, "Sec-WebSocket-Version: 13",
+            ]
+            for name, value in (headers or {}).items():
+                lines.append("%s: %s" % (name, value))
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
+            client = cls(sock)
+            response = client._read_http_response()
+            status_line = response.split(b"\r\n", 1)[0]
+            if b" 101 " not in status_line:
+                raise LoxoneError("WebSocket handshake failed: %r" % status_line)
+            expected = base64.b64encode(
+                hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
+            accept = None
+            for line in response.split(b"\r\n")[1:]:
+                if line.lower().startswith(b"sec-websocket-accept:"):
+                    accept = line.split(b":", 1)[1].strip().decode("ascii")
+            if accept != expected:
+                raise LoxoneError("Sec-WebSocket-Accept did not match")
+            return client
+        except Exception:
+            sock.close()
+            raise
+
+    def _read_http_response(self):
+        while b"\r\n\r\n" not in self._buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise LoxoneError("connection closed during WebSocket handshake")
+            self._buf += chunk
+        head, _, rest = self._buf.partition(b"\r\n\r\n")
+        self._buf = rest
+        return head
+
+    def _recv_exact(self, n):
+        while len(self._buf) < n:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise LoxoneError("WebSocket connection closed")
+            self._buf += chunk
+        data, self._buf = self._buf[:n], self._buf[n:]
+        return data
+
+    def send(self, opcode, payload):
+        # Clients MUST mask every frame (RFC 6455 §5.1); the mask itself
+        # carries no secrecy, it just has to be present and unpredictable.
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        length = len(payload)
+        header = bytes([0x80 | opcode])
+        if length < 126:
+            header += bytes([0x80 | length])
+        elif length < 65536:
+            header += bytes([0x80 | 126]) + struct.pack(">H", length)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack(">Q", length)
+        self.sock.sendall(header + mask + masked)
+
+    def send_text(self, text):
+        self.send(0x1, text.encode("utf-8"))
+
+    def recv(self, deadline=None):
+        """Return (opcode, payload) for the next complete message —
+        reassembling continuation frames, answering pings transparently, and
+        raising on a close frame."""
+        opcode = None
+        payload = bytearray()
+        while True:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LoxoneError("WebSocket read timed out")
+                self.sock.settimeout(remaining)
+            b1, b2 = self._recv_exact(2)
+            fin = b1 & 0x80
+            frame_opcode = b1 & 0x0F
+            masked = b2 & 0x80
+            length = b2 & 0x7F
+            if length == 126:
+                (length,) = struct.unpack(">H", self._recv_exact(2))
+            elif length == 127:
+                (length,) = struct.unpack(">Q", self._recv_exact(8))
+            mask_key = self._recv_exact(4) if masked else None
+            data = self._recv_exact(length) if length else b""
+            if mask_key:  # a conforming server never masks, but tolerate it
+                data = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))
+            if frame_opcode == 0x9:  # ping
+                self.send(0xA, data)
+                continue
+            if frame_opcode == 0xA:  # pong
+                continue
+            if frame_opcode == 0x8:  # close
+                raise LoxoneError("Miniserver closed the WebSocket")
+            if frame_opcode != 0x0:  # 0x0 = continuation, keep prior opcode
+                opcode = frame_opcode
+            payload += data
+            if fin:
+                return opcode, bytes(payload)
+
+    def close(self):
+        try:
+            self.send(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
+# Loxone token handshake (RSA keyexchange + HMAC-signed token, over WS)
+# --------------------------------------------------------------------------
+#
+# Mirrors the reference `lox` CLI's own `ws_authenticate` exactly — same
+# three commands in the same order — since that is the only specification
+# available short of Loxone's own closed-source client.
+
+WS_HANDSHAKE_TIMEOUT = 10.0
+
+
+def _fetch_rsa_public_key(host, port, use_tls, username, password, verify_tls):
+    # Reuses LoxoneClient rather than a second HTTP stack: this is a plain
+    # Basic-auth GET like any other Miniserver request, no different from
+    # what the poller and command worker already do.
+    client = LoxoneClient(host=host, port=port, use_tls=use_tls, username=username,
+                          password=password, verify_tls=verify_tls)
+    try:
+        status, body = client.get("/jdev/sys/getPublicKey")
+    finally:
+        client.close()
+    if status != 200:
+        raise LoxoneError("could not fetch the Miniserver's public key (HTTP %d)" % status)
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        raise LoxoneError("public key response was not valid JSON") from exc
+    pem = data.get("LL", {}).get("value")
+    if not isinstance(pem, str):
+        raise LoxoneError("Miniserver did not return a public key")
+    return parse_rsa_public_key_pem(pem)
+
+
+def _ws_expect_code_200(ws, label, deadline):
+    for _ in range(10):
+        opcode, payload = ws.recv(deadline)
+        if opcode != 0x1:
+            continue
+        try:
+            obj = json.loads(payload)
+        except ValueError:
+            continue
+        ll = obj.get("LL", {}) if isinstance(obj, dict) else {}
+        code = str(ll.get("Code", ll.get("code", "0")))
+        if code == "200":
+            return ll.get("value")
+        if code != "0":
+            raise LoxoneError("%s failed (code %s)" % (label, code))
+    raise LoxoneError("%s: no response from the Miniserver" % label)
+
+
+def ws_authenticate(ws, host, port, use_tls, username, password, verify_tls, deadline):
+    """RSA keyexchange, then an HMAC-signed token request — all three
+    commands sent over the already-open (and already TLS-encrypted, when
+    `use_tls`) WebSocket `ws`. Raises LoxoneError on any failure; the token
+    itself is not returned because nothing here needs to reuse it — the
+    live-push connection re-authenticates itself each time it (re)connects,
+    the same as the reference CLI's own streaming command does."""
+    pubkey = _fetch_rsa_public_key(host, port, use_tls, username, password, verify_tls)
+    aes_key = os.urandom(32)
+    aes_iv = os.urandom(16)
+    key_info = ("%s:%s" % (aes_key.hex(), aes_iv.hex())).encode("ascii")
+    encrypted = base64.b64encode(rsa_pkcs1v15_encrypt(pubkey, key_info)).decode("ascii")
+    ws.send_text("jdev/sys/keyexchange/%s" % encrypted)
+    _ws_expect_code_200(ws, "keyexchange", deadline)
+
+    ws.send_text("jdev/sys/getkey2/%s" % username)
+    key2 = _ws_expect_code_200(ws, "getkey2", deadline)
+    if not isinstance(key2, dict):
+        raise LoxoneError("getkey2: unexpected response shape")
+    key_hex = key2.get("key", "")
+    salt_hex = key2.get("salt", "")
+    hash_alg = key2.get("hashAlg", "SHA1")
+    # The salt is used as a raw hex *string*, not hex-decoded — matching the
+    # Miniserver's own lxcommunicator protocol, not a guess.
+    if hash_alg == "SHA256":
+        pw_hash = hashlib.sha256(
+            ("%s:%s" % (password, salt_hex)).encode()).hexdigest().upper()
+    else:
+        pw_hash = hashlib.sha1(
+            ("%s:%s" % (password, salt_hex)).encode()).hexdigest().upper()
+    try:
+        key_bytes = bytes.fromhex(key_hex)
+    except ValueError as exc:
+        raise LoxoneError("getkey2: malformed key") from exc
+    sig = hmac.new(key_bytes, ("%s:%s" % (username, pw_hash)).encode(),
+                   hashlib.sha256).hexdigest()
+
+    client_uuid = str(uuidlib.uuid4())
+    ws.send_text("jdev/sys/gettoken/%s/%s/4/%s/loxone-omarchy-bridge"
+                 % (sig, username, client_uuid))
+    _ws_expect_code_200(ws, "gettoken", deadline)
+
+
+# --------------------------------------------------------------------------
+# Binary push protocol (value/text state updates)
+# --------------------------------------------------------------------------
+
+
+def parse_bin_header(data):
+    if len(data) < 8 or data[0] != 0x03:
+        raise LoxoneError("malformed binary header")
+    msg_type = data[1]
+    estimated = bool(data[2] & 0x01)
+    payload_len = struct.unpack("<I", data[4:8])[0]
+    return msg_type, estimated, payload_len
+
+
+def parse_loxone_uuid(data):
+    d1 = struct.unpack("<I", data[0:4])[0]
+    d2 = struct.unpack("<H", data[4:6])[0]
+    d3 = struct.unpack("<H", data[6:8])[0]
+    return "%08x-%04x-%04x-%s" % (d1, d2, d3, data[8:16].hex())
+
+
+def parse_text_states(data):
+    """Variable-length records: 16-byte UUID, 16-byte icon UUID, 4-byte
+    little-endian length, then the text itself padded to a 4-byte boundary."""
+    out = []
+    offset = 0
+    while offset + 36 <= len(data):
+        state_uuid = parse_loxone_uuid(data[offset:offset + 16])
+        (text_len,) = struct.unpack("<I", data[offset + 32:offset + 36])
+        offset += 36
+        if offset + text_len > len(data):
+            break
+        text = data[offset:offset + text_len].decode("utf-8", "replace")
+        offset += (text_len + 3) & ~3
+        out.append((state_uuid, text))
+    return out
+
+
+LIVE_PUSH_RECONNECT_DELAY = 5.0
+
+
+class LivePushThread(threading.Thread):
+    """Subscribes to the Miniserver's push channel for `activeMoods`
+    text-state updates on LightControllerV2 controls (see the module
+    docstring for why only that one control type needs this), and — since
+    that control type's mood-restore behavior was found live to differ
+    between this bridge's stateless HTTP command requests and the official
+    Loxone app's own persistent authenticated session — also sends that same
+    control type's on/off commands over this same authenticated session
+    rather than plain HTTP, via `send_command`. Everything else (every other
+    control's state, every other command) still goes through plain HTTP.
+
+    Best-effort by design: any failure here — old firmware without this
+    handshake, a network hiccup, an unexpected response shape — is caught,
+    logged as a `light_push_unavailable` message once, and retried on a
+    fixed delay. HTTP polling and CommandWorker's optimistic hint keep
+    LightControllerV2 usable via plain HTTP regardless of whether this ever
+    connects — `Bridge.dispatch_command` only routes a command here once
+    `light_push_available` has actually been seen."""
+
+    def __init__(self, epoch, out_queue, cfg, watch):
+        super().__init__(daemon=True)
+        self.epoch = epoch
+        self.out_queue = out_queue
+        self.cfg = cfg
+        self.watch = watch  # state UUID -> entity_id
+        self.stop_event = threading.Event()
+        self.commands = queue.Queue()  # (uuid, verb, tag)
+        self._announced_unavailable = False
+
+    def send_command(self, uuid, verb, tag):
+        self.commands.put((uuid, verb, tag))
+
+    def run(self):
+        if not self.watch:
+            return  # nothing to watch — no LightControllerV2 on this Miniserver
+        while not self.stop_event.is_set():
+            try:
+                self._connect_and_listen()
+            except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+                if not self._announced_unavailable:
+                    self._announced_unavailable = True
+                    self.out_queue.put(("light_push_unavailable", self.epoch, str(exc)))
+            if self.stop_event.wait(LIVE_PUSH_RECONNECT_DELAY):
+                break
+
+    def _connect_and_listen(self):
+        cfg = self.cfg
+        auth = base64.b64encode(
+            ("%s:%s" % (cfg["username"], cfg["password"])).encode()).decode()
+        ws = WebSocketClient.connect(
+            cfg["host"], cfg["port"], "/ws/rfc6455", cfg["use_tls"], cfg["verify_tls"],
+            headers={"Authorization": "Basic " + auth})
+        try:
+            deadline = time.monotonic() + WS_HANDSHAKE_TIMEOUT
+            ws_authenticate(ws, cfg["host"], cfg["port"], cfg["use_tls"],
+                            cfg["username"], cfg["password"], cfg["verify_tls"], deadline)
+            # A successful handshake is itself worth reporting: it clears
+            # any earlier "unavailable" the panel may be showing, and is what
+            # lets Bridge.dispatch_command start routing commands here.
+            self._announced_unavailable = False
+            self.out_queue.put(("light_push_available", self.epoch))
+
+            ws.send_text("jdev/sps/enablebinstatusupdate")
+            pending_header = None
+            while not self.stop_event.is_set():
+                # Outgoing commands take priority over waiting for the next
+                # push — a light switching on must not queue behind whatever
+                # this loop happens to be blocked reading.
+                while True:
+                    try:
+                        uuid, verb, tag = self.commands.get_nowait()
+                    except queue.Empty:
+                        break
+                    ok, error = self._send_command(
+                        ws, uuid, verb, time.monotonic() + WS_HANDSHAKE_TIMEOUT)
+                    self.out_queue.put(("command_result", self.epoch, tag, ok, error))
+
+                try:
+                    opcode, data = ws.recv(deadline=time.monotonic() + 1.0)
+                except LoxoneError as exc:
+                    if "timed out" not in str(exc):
+                        raise
+                    continue
+                if opcode != 0x2:
+                    continue
+                if pending_header is not None:
+                    msg_type, _ = pending_header
+                    pending_header = None
+                    body = data
+                elif len(data) >= 8 and data[0] == 0x03:
+                    msg_type, estimated, payload_len = parse_bin_header(data)
+                    if estimated:
+                        continue
+                    if payload_len == 0:
+                        body = b""
+                    elif len(data) > 8:
+                        body = data[8:]
+                    else:
+                        pending_header = (msg_type, payload_len)
+                        continue
+                else:
+                    continue
+
+                if msg_type != 0x03:  # only text-states carry activeMoods
+                    continue
+                for state_uuid, text in parse_text_states(body):
+                    entity_id = self.watch.get(state_uuid)
+                    if entity_id is None:
+                        continue
+                    state = self._mood_state(text)
+                    if state is not None:
+                        self.out_queue.put(
+                            ("light_push", self.epoch, entity_id, state))
+        finally:
+            ws.close()
+
+    @staticmethod
+    def _send_command(ws, uuid, verb, deadline):
+        """Send one `jdev/sps/io/<uuid>/<verb>` over the already-authenticated
+        session and read its own text-frame response — the same command/
+        response shape the handshake's own keyexchange/getkey2/gettoken use,
+        just addressed at a control instead of `jdev/sys/...`. Any binary
+        push frames that arrive while waiting are simply skipped: they get
+        redelivered on the Miniserver's own next update regardless, so
+        losing this one instance of one is not losing information."""
+        ws.send_text("jdev/sps/io/%s/%s" % (uuid, verb))
+        for _ in range(10):
+            opcode, payload = ws.recv(deadline)
+            if opcode != 0x1:
+                continue
+            try:
+                obj = json.loads(payload)
+            except ValueError:
+                continue
+            ll = obj.get("LL", {}) if isinstance(obj, dict) else {}
+            code = str(ll.get("Code", ll.get("code", "0")))
+            if code == "200":
+                return True, ""
+            if code != "0":
+                return False, "Miniserver rejected the command (code %s)" % code
+        return False, "no response from the Miniserver"
+
+    @staticmethod
+    def _mood_state(text):
+        """`[778]` is Loxone's system-reserved "off" mood (confirmed live —
+        see the module docstring); an empty list or anything else is on."""
+        try:
+            moods = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(moods, list):
+            return None
+        return "off" if (not moods or moods == [778]) else "on"
+
+
+# --------------------------------------------------------------------------
+# Bridge
+# --------------------------------------------------------------------------
+
+
+class Bridge:
+    def __init__(self, demo=False):
+        self.demo = demo
+        self.phase = "idle"
+        self.generation = 0
+        self.epoch = 0
+
+        self.cfg = None          # dict for LoxoneClient(**cfg), or None in demo mode
+        self.password = ""       # kept only for redaction in error text
+        self.want_connect = False
+        self.backoff = BACKOFF_START
+        self.next_attempt = 0.0
+
+        self.poller = None
+        self.command_worker = None
+        self.light_push_thread = None
+        self.light_push_ready = False
+        self.demo_house = None
+        self.registry = {}
+        self.rooms = []
+        self.last_states = {}
+        # entity_id -> "on"/"off", for LightControllerV2's own reading —
+        # see build_entity and CommandWorker._record_hint. Deliberately
+        # survives a poller reconnect (still the best information available)
+        # but not a fresh `config` to a different Miniserver — apply_config
+        # clears it below.
+        self.light_hints = {}
+
+        # The camera is independent of the Miniserver connection — its own
+        # epoch, so a Miniserver reconnect never has to touch it and a camera
+        # reconnect never has to touch the Miniserver poller.
+        self.camera_epoch = 0
+        self.camera_worker = None
+        self.camera_cfg = None
+        self.camera_password = ""
+        # Whether a viewer wants frames right now — see apply_camera_resume/
+        # apply_camera_pause. Distinct from `camera_cfg is not None`: a camera
+        # can be fully configured and still sitting idle with nobody watching.
+        self.camera_active = False
+
+        self.running = True
+        self._out_lock = threading.Lock()
+        self._commands = queue.Queue()
+        self._command_event = threading.Event()
+        self.worker_queue = queue.Queue()
+
+    # -- output -----------------------------------------------------------
+
+    def emit(self, obj):
+        obj = dict(obj)
+        obj.setdefault("protocolVersion", PROTOCOL_VERSION)
+        if obj.get("ev") in {"phase", "states", "state_changed", "removed",
+                              "registries", "result", "log"}:
+            obj.setdefault("generation", self.generation)
+        line = json.dumps(obj, ensure_ascii=False)
+        with self._out_lock:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+
+    def log(self, level, msg):
+        self.emit({"ev": "log", "level": level, "msg": msg})
+
+    def safe_error(self, error, fallback="Miniserver request failed."):
+        text = str(error or "").strip() or fallback
+        text = redact(text, self.password)
+        text = redact(text, self.camera_password)
+        return text[:1000]
+
+    def set_phase(self, phase, error="", force=False, error_kind="connection"):
+        if phase == self.phase and not error and not force:
+            return
+        self.phase = phase
+        payload = {"ev": "phase", "phase": phase}
+        if error:
+            payload["error"] = self.safe_error(error)
+            payload["errorKind"] = error_kind
+        self.emit(payload)
+
+    def emit_result(self, tag, ok, error="", error_kind="command"):
+        if not tag:
+            return
+        payload = {"ev": "result", "tag": str(tag), "ok": bool(ok)}
+        if error:
+            payload["error"] = self.safe_error(error)
+            payload["errorKind"] = error_kind
+        self.emit(payload)
+
+    # -- command intake -----------------------------------------------------
+
+    def stdin_loop(self):
+        for raw in sys.stdin:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                command = json.loads(raw)
+            except ValueError:
+                self.log("warn", "ignoring malformed command line")
+                continue
+            if not isinstance(command, dict):
+                self.log("warn", "ignoring command that isn't a JSON object")
+                continue
+            self._commands.put(command)
+            self._command_event.set()
+        self._commands.put({"op": "shutdown"})
+        self._command_event.set()
+
+    def drain_commands(self):
+        self._command_event.clear()
+        while True:
+            try:
+                command = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self.handle_command(command)
+            except Exception as exc:  # noqa: BLE001
+                self.log("warn", "command failed: %s" % self.safe_error(exc))
+
+    def handle_command(self, command):
+        op = command.get("op")
+        protocol_version = command.get("protocolVersion")
+        if op != "shutdown" and protocol_version != PROTOCOL_VERSION:
+            generation = command.get("generation")
+            self.emit({
+                "ev": "phase", "phase": "error",
+                "error": "Incompatible bridge protocol version.",
+                "errorKind": "protocol",
+                "generation": generation if isinstance(generation, int)
+                else self.generation,
+            })
+            return
+
+        if op == "shutdown":
+            self.running = False
+        elif op == "config":
+            self.apply_config(command)
+        elif op == "disconnect":
+            self.apply_disconnect(command)
+        elif op == "refresh":
+            self.request_refresh()
+        elif op == "registries":
+            if self.phase == "connected":
+                self.emit({"ev": "registries", "rooms": self.rooms})
+        elif op == "command":
+            self.dispatch_command(command)
+        elif op == "camera_config":
+            self.apply_camera_config(command)
+        elif op == "camera_disconnect":
+            self.apply_camera_disconnect()
+        elif op == "camera_resume":
+            self.apply_camera_resume()
+        elif op == "camera_pause":
+            self.apply_camera_pause()
+        else:
+            self.log("warn", "unknown op %r" % op)
+
+    def apply_config(self, command):
+        if self.demo:
+            next_generation = self._resolve_generation(command)
+            unchanged = (next_generation == self.generation and self.want_connect
+                         and self.poller is not None)
+            if unchanged:
+                return
+            self.stop_workers()
+            self.generation = next_generation
+            self.cfg = None
+            self.password = ""
+            self.want_connect = True
+            self.backoff = BACKOFF_START
+            self.next_attempt = 0.0
+            return
+
+        raw_url = command.get("url") or ""
+        username = command.get("username") or ""
+        password = command.get("password") or ""
+        verify_tls = command.get("verifyTls") is True
+        if not isinstance(username, str):
+            username = ""
+        if not isinstance(password, str):
+            password = ""
+
+        next_generation = self._resolve_generation(command)
+
+        want_connect = bool(str(raw_url).strip() and username and password)
+        cfg = None
+        if want_connect:
+            try:
+                host, port, use_tls = parse_miniserver_url(raw_url)
+            except LoxoneError as exc:
+                self.stop_workers()
+                self.generation = next_generation
+                self.want_connect = False
+                self.cfg = None
+                self.set_phase("error", str(exc), force=True)
+                return
+            cfg = {"host": host, "port": port, "use_tls": use_tls,
+                   "username": username, "password": password,
+                   "verify_tls": verify_tls}
+
+        unchanged = (next_generation == self.generation and cfg == self.cfg
+                     and self.want_connect == want_connect
+                     and (self.poller is not None or not want_connect))
+        if unchanged:
+            return
+
+        if cfg != self.cfg:
+            # A different Miniserver (or none) — UUIDs from the old one are
+            # meaningless here even if one happened to collide.
+            self.light_hints = {}
+        self.stop_workers()
+        self.generation = next_generation
+        self.cfg = cfg
+        self.password = password
+        self.want_connect = want_connect
+        self.backoff = BACKOFF_START
+        self.next_attempt = 0.0
+        if not self.want_connect:
+            self.set_phase("idle", force=True)
+
+    def _resolve_generation(self, command):
+        supplied = command.get("generation")
+        if isinstance(supplied, int) and supplied >= 0:
+            return supplied
+        return self.generation + 1
+
+    def apply_disconnect(self, command):
+        self.stop_workers()
+        self.generation = self._resolve_generation(command)
+        self.want_connect = False
+        self.cfg = None
+        self.password = ""
+        self.set_phase("idle", force=True)
+
+    def request_refresh(self):
+        if self.phase != "connected":
+            return
+        # A fresh PollerThread would re-fetch the structure for nothing; the
+        # next scheduled poll is already at most POLL_INTERVAL away. Refresh
+        # instead re-sends what the panel already has plus the rooms list,
+        # which is what a settings overlay reopening actually needs.
+        self.emit({"ev": "states", "entities": list(self.last_states.values())})
+        self.emit({"ev": "registries", "rooms": self.rooms})
+
+    def dispatch_command(self, command):
+        entity_id = command.get("entity_id")
+        cmd = command.get("command")
+        value = command.get("value")
+        tag = command.get("tag")
+        if not isinstance(entity_id, str) or not entity_id:
+            self.emit_result(tag, False, "Invalid entity id.")
+            return
+        if not isinstance(cmd, str) or not cmd:
+            self.emit_result(tag, False, "Invalid command.")
+            return
+        if self.phase != "connected" or self.command_worker is None:
+            self.emit_result(tag, False, "Not connected to the Miniserver.")
+            return
+
+        entry = self.registry.get(entity_id)
+        if (entry is not None and cmd in ("on", "off") and entry.domain == "light"
+                and "lightcontroller" in entry.control_type.lower()
+                and self.light_push_ready and self.light_push_thread is not None):
+            # Verified live: this control type's mood-restore behaves
+            # reliably over the app's own authenticated session but not over
+            # repeated stateless HTTP requests — see LivePushThread's
+            # docstring. Route through the same session it already holds.
+            try:
+                verb = translate_command(entry, cmd, value)
+            except LoxoneError as exc:
+                self.emit_result(tag, False, str(exc))
+                return
+            self.light_hints[entity_id] = cmd
+            self.light_push_thread.send_command(entry.uuid, verb, tag)
+            return
+
+        self.command_worker.submit(entity_id, cmd, value, tag, self.registry)
+
+    # -- connection lifecycle ----------------------------------------------
+
+    def stop_workers(self):
+        if self.poller is not None:
+            self.poller.stop_event.set()
+            self.poller = None
+        if self.command_worker is not None:
+            self.command_worker.stop()
+            self.command_worker = None
+        if self.light_push_thread is not None:
+            self.light_push_thread.stop_event.set()
+            self.light_push_thread = None
+        self.light_push_ready = False
+        self.epoch += 1
+
+    def start_poller(self):
+        self.set_phase("connecting")
+        epoch = self.epoch
+        if self.demo:
+            self.demo_house = DemoHouse()
+            self.poller = PollerThread(epoch, self.worker_queue,
+                                       demo_house=self.demo_house)
+        else:
+            self.poller = PollerThread(epoch, self.worker_queue, cfg=self.cfg,
+                                       light_hints=self.light_hints)
+        self.poller.start()
+
+    def schedule_retry(self, message, error_kind="connection"):
+        self.stop_workers()
+        self.set_phase("error" if self.backoff >= BACKOFF_MAX else "connecting",
+                       message, error_kind=error_kind)
+        self.next_attempt = now() + self.backoff
+        self.backoff = min(self.backoff * 2, BACKOFF_MAX)
+
+    # -- camera lifecycle ----------------------------------------------------
+    # Deliberately separate from the Miniserver's stop_workers/start_poller/
+    # schedule_retry: a camera has nothing to authenticate against a Loxone
+    # structure for, no generation to reconcile with QML's connectionGeneration,
+    # and should keep retrying a transient failure instead of backing off —
+    # folding it into the Miniserver machinery would just make both harder to
+    # reason about for no shared behavior.
+    #
+    # "Configured" and "actually pulling frames" are kept as separate ideas.
+    # A camera stream, unlike Miniserver polling, has a real ongoing cost
+    # (network bandwidth, and load on the camera's own encoder) for something
+    # nobody may be looking at — the shell has no popover open, or Settings
+    # is on a different tab. `camera_config` only ever records credentials;
+    # `camera_resume`/`camera_pause` are what start and stop the worker, and
+    # QML calls them from viewer-count tracking (see Service.qml's
+    # register/unregisterCameraViewer). Reconfiguring while a viewer is
+    # already watching restarts the worker under the new config immediately;
+    # reconfiguring with nobody watching just updates what a later resume
+    # will connect to.
+
+    def apply_camera_config(self, command):
+        raw_url = command.get("url") or ""
+        username = command.get("username") or ""
+        password = command.get("password") or ""
+        verify_tls = command.get("verifyTls") is True
+        frame_path = command.get("framePath") or ""
+        if not isinstance(username, str):
+            username = ""
+        if not isinstance(password, str):
+            password = ""
+        if not isinstance(frame_path, str):
+            frame_path = ""
+
+        want = bool(str(raw_url).strip() and frame_path)
+        cfg = None
+        if want:
+            cfg = {"url": raw_url, "username": username, "password": password,
+                   "verify_tls": verify_tls, "frame_path": frame_path}
+
+        if cfg == self.camera_cfg:
+            return
+
+        was_active = self.camera_active
+        self.stop_camera_worker()
+        self.camera_cfg = cfg
+        self.camera_password = password
+        if not want:
+            self.camera_active = False
+            self.emit({"ev": "camera", "status": "idle"})
+            return
+        if was_active:
+            self.start_camera_worker()
+        else:
+            self.emit({"ev": "camera", "status": "idle"})
+
+    def apply_camera_disconnect(self):
+        self.stop_camera_worker()
+        self.camera_cfg = None
+        self.camera_password = ""
+        self.camera_active = False
+        self.emit({"ev": "camera", "status": "idle"})
+
+    def apply_camera_resume(self):
+        self.camera_active = True
+        if self.camera_cfg is None:
+            self.emit({"ev": "camera", "status": "idle"})
+            return
+        if self.camera_worker is None:
+            self.start_camera_worker()
+
+    def apply_camera_pause(self):
+        self.camera_active = False
+        if self.camera_worker is not None:
+            self.stop_camera_worker()
+            self.emit({"ev": "camera", "status": "idle"})
+
+    def stop_camera_worker(self):
+        if self.camera_worker is not None:
+            self.camera_worker.stop_event.set()
+            self.camera_worker = None
+        self.camera_epoch += 1
+
+    def start_camera_worker(self):
+        epoch = self.camera_epoch
+        self.emit({"ev": "camera", "status": "connecting"})
+        self.camera_worker = CameraWorker(epoch, self.worker_queue, **self.camera_cfg)
+        self.camera_worker.start()
+
+    # -- worker message dispatch --------------------------------------------
+
+    def drain_worker_queue(self):
+        while True:
+            try:
+                item = self.worker_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.handle_worker_item(item)
+
+    def handle_worker_item(self, item):
+        kind = item[0]
+        if kind == "camera_status":
+            _, epoch, status, error = item
+            if epoch != self.camera_epoch:
+                return  # a camera connection we have already replaced
+            payload = {"ev": "camera", "status": status}
+            if error:
+                payload["error"] = self.safe_error(error)
+            self.emit(payload)
+            return
+
+        epoch = item[1]
+        if epoch != self.epoch:
+            return  # a connection we have already replaced
+
+        if kind == "connect_error":
+            self.schedule_retry(item[2])
+        elif kind == "connected":
+            _, _, registry, rooms, entities, light_watch = item
+            self.registry = registry
+            self.rooms = rooms
+            self.backoff = BACKOFF_START
+            self.emit({"ev": "registries", "rooms": rooms})
+            self.apply_snapshot(entities, initial=True)
+            self.set_phase("connected")
+            self.command_worker = CommandWorker(
+                epoch, self.worker_queue, cfg=self.cfg, demo_house=self.demo_house,
+                light_hints=self.light_hints)
+            self.command_worker.start()
+            if not self.demo:
+                # entity_id -> state UUID becomes state UUID -> entity_id:
+                # LivePushThread looks controls up by what it just heard
+                # about, not the other way around.
+                reverse_watch = {uuid: eid for eid, uuid in light_watch.items()}
+                self.light_push_thread = LivePushThread(
+                    epoch, self.worker_queue, self.cfg, reverse_watch)
+                self.light_push_thread.start()
+        elif kind == "poll_result":
+            self.apply_snapshot(item[2], initial=False)
+        elif kind == "poll_error":
+            self.schedule_retry(item[2])
+        elif kind == "light_push":
+            _, _, entity_id, state = item
+            self.light_hints[entity_id] = state
+            cached = self.last_states.get(entity_id)
+            if cached is not None and cached.get("state") != state:
+                updated = dict(cached)
+                updated["state"] = state
+                self.last_states[entity_id] = updated
+                self.emit({"ev": "state_changed", "entity": updated})
+        elif kind == "light_push_available":
+            self.light_push_ready = True
+            self.log("info", "live light-controller state is available")
+        elif kind == "light_push_unavailable":
+            self.light_push_ready = False
+            self.log("warn",
+                     "live light-controller state unavailable (%s) — falling back "
+                     "to polling for LightControllerV2 on/off" % self.safe_error(item[2]))
+        elif kind == "command_result":
+            _, _, tag, ok, error = item
+            self.emit_result(tag, ok, error)
+        elif kind == "entity_result":
+            self.apply_snapshot([item[2]], initial=False)
+
+    def apply_snapshot(self, entities, initial):
+        if initial:
+            self.last_states = {e["entity_id"]: e for e in entities}
+            self.emit({"ev": "states", "entities": entities})
+            return
+        for entity in entities:
+            entity_id = entity["entity_id"]
+            if self.last_states.get(entity_id) != entity:
+                self.last_states[entity_id] = entity
+                self.emit({"ev": "state_changed", "entity": entity})
+
+    # -- main loop -----------------------------------------------------------
+
+    def run(self):
+        reader = threading.Thread(target=self.stdin_loop, daemon=True)
+        reader.start()
+
+        while self.running:
+            self.drain_commands()
+            if not self.running:
+                break
+
+            if self.poller is None and self.want_connect and now() >= self.next_attempt:
+                self.start_poller()
+
+            self.drain_worker_queue()
+
+            wait_for = 0.2
+            if self.poller is None and self.want_connect:
+                wait_for = max(0.0, min(wait_for, self.next_attempt - now()))
+            self._command_event.wait(wait_for)
+
+        self.stop_workers()
+        self.stop_camera_worker()
+
+
+def main(argv):
+    demo = "--demo" in argv
+    Bridge(demo=demo).run()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

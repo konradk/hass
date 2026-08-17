@@ -51,15 +51,14 @@ section("identity and naming", () => {
 });
 
 section("on/off semantics", () => {
-  // Locked and open count as "on", so a lock and a cover read like a light.
   eq("on", Model.isOn(entity("light.a", "on")), true);
   eq("locked is on", Model.isOn(entity("lock.a", "locked")), true);
   eq("open is on", Model.isOn(entity("cover.a", "open")), true);
   eq("off", Model.isOn(entity("light.a", "off")), false);
   eq("closed is off", Model.isOn(entity("cover.a", "closed")), false);
   eq("unlocked is off", Model.isOn(entity("lock.a", "unlocked")), false);
-  eq("a climate HVAC mode is on", Model.isOn(entity("climate.a", "heat")), true);
-  eq("climate off is off", Model.isOn(entity("climate.a", "off")), false);
+  // A Loxone room controller has no "off" state; anything reported counts.
+  eq("a climate entity with a state is on", Model.isOn(entity("climate.a", "auto")), true);
   eq("unavailable climate is not on",
      Model.isOn(entity("climate.a", "unavailable")), false);
 });
@@ -81,28 +80,20 @@ section("state text", () => {
 
 section("subtitles", () => {
   eq("climate shows target and current",
-     Model.subtitle(entity("climate.a", "heat", {
-       temperature: 22.0, current_temperature: 21.4, temperature_unit: "°C" })),
+     Model.subtitle(entity("climate.a", "auto", {
+       temperature: 22.0, current_temperature: 21.4 })),
      "Target 22°C · Now 21.4°C");
-  eq("climate range replaces the single target",
-     Model.subtitle(entity("climate.a", "heat", {
-       target_temp_low: 18, target_temp_high: 24, temperature_unit: "°C" })),
-     "Target 18°C–24°C");
-  eq("media shows artist and title",
-     Model.subtitle(entity("media_player.a", "playing", {
-       media_title: "Open Floor", media_artist: "Daylight FM" })),
-     "Daylight FM — Open Floor");
-  eq("media falls back to the channel",
-     Model.subtitle(entity("media_player.a", "playing", { media_channel: "BBC 6" })),
-     "BBC 6");
-  eq("media with nothing playing shows the state",
-     Model.subtitle(entity("media_player.a", "paused")), "Paused");
+  eq("climate with only a current reading still shows it",
+     Model.subtitle(entity("climate.a", "auto", { current_temperature: 21.4 })),
+     "Now 21.4°C");
+  eq("cover shows its live position",
+     Model.subtitle(entity("cover.a", "open", { position: 45 })), "45% open");
+  eq("cover without a reported position falls back to its state",
+     Model.subtitle(entity("cover.a", "open")), "Open");
   eq("a toggle shows its state",
      Model.subtitle(entity("switch.a", "off")), "Off");
-  eq("a scene stays available despite an unknown state",
+  eq("a pushbutton stays available despite an unknown state",
      Model.isAvailable(entity("scene.a", "unknown")), true);
-  eq("a script stays available too",
-     Model.isAvailable(entity("script.a", "unknown")), true);
   eq("an unavailable light is not available",
      Model.isAvailable(entity("light.a", "unavailable")), false);
   eq("a missing entity is not available", Model.isAvailable(null), false);
@@ -113,41 +104,33 @@ section("subtitles", () => {
 });
 
 section("badges", () => {
-  eq("scene", Model.badgeText(entity("scene.a", "unknown")), "Scene");
-  eq("camera", Model.badgeText(entity("camera.a", "streaming")), "Camera");
-  // hvac_action is what a real climate entity exposes; the mode is the state.
-  eq("climate prefers hvac_action",
-     Model.badgeText(entity("climate.a", "heat", { hvac_action: "idle" })), "Idle");
-  eq("climate falls back to the state, which is the mode",
-     Model.badgeText(entity("climate.a", "heat")), "Heat");
+  eq("pushbutton", Model.badgeText(entity("scene.a", "unknown")), "Trigger");
+  eq("cover shows its position",
+     Model.badgeText(entity("cover.a", "open", { position: 20 })), "20% open");
+  eq("climate shows the current reading",
+     Model.badgeText(entity("climate.a", "auto", { current_temperature: 21.4 })),
+     "21.4°C now");
+  eq("climate without a current reading falls back to displayState",
+     Model.badgeText(entity("climate.a", "auto")), "Auto");
 });
 
 section("brightness", () => {
-  // Modern Home Assistant advertises dimming through supported_color_modes.
-  eq("a dimmable colour mode counts",
-     Model.supportsBrightness(entity("light.a", "on",
-       { supported_color_modes: ["brightness"] })), true);
-  eq("a colour light is dimmable too",
-     Model.supportsBrightness(entity("light.a", "on",
-       { supported_color_modes: ["color_temp", "hs"] })), true);
-  eq("an on/off-only light is not",
-     Model.supportsBrightness(entity("light.a", "on",
-       { supported_color_modes: ["onoff"] })), false);
-  // The regression this rule exists for: Home Assistant nulls brightness when
-  // the light is off, which must not read as "not dimmable".
+  // A Loxone Dimmer reports its live position as a 0-100 percent, and the
+  // bridge writes it straight into `brightness` — there is no 0-255 scale
+  // and no separate "supports dimming" flag to negotiate.
+  eq("a reported brightness is enough",
+     Model.supportsBrightness(entity("light.a", "on", { brightness: 40 })), true);
+  eq("no reported brightness means no slider",
+     Model.supportsBrightness(entity("light.a", "on")), false);
   eq("a dimmable light that is off still offers the slider",
-     Model.supportsBrightness(entity("light.a", "off",
-       { supported_color_modes: ["brightness"], brightness: null })), true);
-  eq("legacy supported_features bit 0 still counts",
-     Model.supportsBrightness(entity("light.a", "on", { supported_features: 1 })), true);
-  eq("a live brightness attribute alone is enough",
-     Model.supportsBrightness(entity("light.a", "on", { brightness: 10 })), true);
-  eq("a plain light is not dimmable",
-     Model.supportsBrightness(entity("light.a", "on", { supported_features: 0 })), false);
+     Model.supportsBrightness(entity("light.a", "off", { brightness: 0 })), true);
   eq("only lights are dimmable",
-     Model.supportsBrightness(entity("switch.a", "on", { brightness: 200 })), false);
-  eq("255 is full", Model.brightnessPercent(entity("light.a", "on", { brightness: 255 })), 100);
+     Model.supportsBrightness(entity("switch.a", "on", { brightness: 40 })), false);
+  eq("100 is full",
+     Model.brightnessPercent(entity("light.a", "on", { brightness: 100 })), 100);
   eq("0 is off", Model.brightnessPercent(entity("light.a", "on", { brightness: 0 })), 0);
+  eq("out-of-range values are clamped",
+     Model.brightnessPercent(entity("light.a", "on", { brightness: 140 })), 100);
   eq("missing brightness is signalled with -1",
      Model.brightnessPercent(entity("light.a", "on")), -1);
 });
@@ -156,85 +139,61 @@ section("temperature", () => {
   eq("a whole number drops its decimal", Model.formatTemp(22.0, "°C"), "22°C");
   eq("a fraction keeps one place", Model.formatTemp(21.44, "°C"), "21.4°C");
   eq("no unit, no suffix", Model.formatTemp(21.5, ""), "21.5");
-  eq("celsius steps by a half",
-     Model.temperatureStep(entity("climate.a", "heat", { temperature_unit: "°C" })), 0.5);
-  eq("fahrenheit steps by one",
-     Model.temperatureStep(entity("climate.a", "heat", { temperature_unit: "°F" })), 1.0);
-  eq("a declared step wins over the guess",
-     Model.temperatureStep(entity("climate.a", "heat", { target_temp_step: 0.1 })), 0.1);
-
-  // A real climate entity has no unit attribute at all — the instance-wide one
-  // arrives from the bridge and is passed in.
-  eq("the instance unit is used when the entity has none",
-     Model.subtitle(entity("climate.a", "heat", { temperature: 22.0 }), "°F"),
-     "Target 22°F");
-  eq("without any unit the number stands alone",
-     Model.subtitle(entity("climate.a", "heat", { temperature: 22.0 })), "Target 22");
-  eq("the instance unit drives the step too",
-     Model.temperatureStep(entity("climate.a", "heat"), "°F"), 1.0);
-  eq("and the fallback range",
-     Model.temperatureRange(entity("climate.a", "heat"), "°F"), { min: 50, max: 90 });
+  eq("the comfort-temperature step is a half degree by default",
+     Model.temperatureStep(entity("climate.a", "auto")), 0.5);
+  eq("a declared step wins over the default",
+     Model.temperatureStep(entity("climate.a", "auto", { target_temp_step: 0.1 })), 0.1);
   eq("declared limits win",
-     Model.temperatureRange(entity("climate.a", "heat", { min_temp: 16, max_temp: 30 })),
+     Model.temperatureRange(entity("climate.a", "auto", { min_temp: 16, max_temp: 30 })),
      { min: 16, max: 30 });
   eq("nonsense limits fall back",
-     Model.temperatureRange(entity("climate.a", "heat", { min_temp: 30, max_temp: 16 })),
+     Model.temperatureRange(entity("climate.a", "auto", { min_temp: 30, max_temp: 16 })),
      { min: 5, max: 35 });
-  eq("fahrenheit has its own fallback",
-     Model.temperatureRange(entity("climate.a", "heat", { temperature_unit: "°F" })),
-     { min: 50, max: 90 });
+  eq("no declared limits falls back to a wide comfort range",
+     Model.temperatureRange(entity("climate.a", "auto")), { min: 5, max: 35 });
 
-  const rangeEntity = entity("climate.a", "heat", {
-    supported_features: 2, target_temp_low: 18, target_temp_high: 24,
-    min_temp: 10, max_temp: 30
-  });
-  eq("crossed target bounds are normalized",
-     Model.climateTemperatureData(rangeEntity, undefined, 27, 16, "°C"),
-     { target_temp_low: 16, target_temp_high: 27 });
-  eq("target bounds are clamped to the entity range",
-     Model.climateTemperatureData(rangeEntity, undefined, -10, 50, "°C"),
-     { target_temp_low: 10, target_temp_high: 30 });
-  eq("an unsupported synthetic target is rejected",
-     Model.climateTemperatureData(entity("climate.a", "heat"), 22, undefined,
-                                  undefined, "°C"), {});
+  const target = entity("climate.a", "auto", { temperature: 22 });
+  eq("a target within range is accepted",
+     Model.climateTemperatureData(target, 23, "°C"), { temperature: 23 });
+  eq("a target is clamped to the entity range",
+     Model.climateTemperatureData(
+       entity("climate.a", "auto", { temperature: 22, min_temp: 10, max_temp: 30 }),
+       50, "°C"),
+     { temperature: 30 });
+  eq("without a reported target the control is not writable",
+     Model.climateTemperatureData(entity("climate.a", "auto"), 22, "°C"), {});
 });
 
 section("activity summary", () => {
   const light = (state) => entity("light.a", state, { friendly_name: "Lamp" });
   const sw = (state) => entity("switch.b", state, { friendly_name: "Plug" });
-  const player = (state, n) => entity("media_player." + (n || "x"), state,
-    { friendly_name: n || "Sonos" });
 
   eq("nothing picked", Model.activitySummary([]), "No devices picked");
   eq("everything off", Model.activitySummary([light("off"), sw("off")]), "All off");
   eq("one on", Model.activitySummary([light("on"), sw("off")]), "1 on");
   eq("several on", Model.activitySummary([light("on"), sw("on")]), "2 on");
-  eq("a player names itself",
-     Model.activitySummary([player("playing", "Sonos")]), "Sonos playing");
-  eq("several players are counted, not listed",
-     Model.activitySummary([player("playing", "a"), player("playing", "b")]),
-     "2 playing");
-  eq("a paused player is not playing",
-     Model.activitySummary([player("paused", "Sonos")]), "All off");
-  eq("both halves join",
-     Model.activitySummary([light("on"), player("playing", "Sonos")]),
-     "1 on · Sonos playing");
-  // A locked door reads as `isOn`, but "3 on" must not be counting deadbolts.
+  // A locked door and an open cover both read as `isOn`, but "on" is a
+  // light/switch count, not a tally of every device that happens to answer
+  // isOn.
   eq("locks are left out",
      Model.activitySummary([entity("lock.a", "locked"), light("off")]), "All off");
+  eq("covers are left out",
+     Model.activitySummary([entity("cover.a", "open"), light("off")]), "All off");
   eq("sensors are left out",
      Model.activitySummary([entity("sensor.a", "22.5"), light("off")]), "All off");
   eq("a missing entity is skipped", Model.activitySummary([null, light("on")]), "1 on");
 });
 
 section("demo starter picks match the demo house", () => {
-  // The ids live in two files — this list and the bridge's fake house. A stale
-  // one here would show up as an unavailable ghost row the moment someone
-  // turns demo mode on, so read the bridge and compare.
-  const bridge = fs.readFileSync(path.join(__dirname, "..", "bin", "hass-bridge"), "utf8");
-  const block = bridge.slice(bridge.indexOf("DEMO_DEVICES = {"),
-                             bridge.indexOf("DEMO_PLAYLIST"));
-  const known = new Set([...block.matchAll(/"([a-z_]+\.[a-z0-9_]+)":/g)].map((m) => m[1]));
+  // The ids live in two files — this list and the bridge's fake house. A
+  // stale one here would show up as an unavailable ghost row the moment
+  // someone turns demo mode on, so read the bridge and compare.
+  const bridge = fs.readFileSync(
+    path.join(__dirname, "..", "bin", "loxone-bridge"), "utf8");
+  const block = bridge.slice(bridge.indexOf("DEMO_FIXTURE = ["),
+                             bridge.indexOf("class DemoHouse"));
+  const known = new Set(
+    [...block.matchAll(/\("([a-z_]+\.[0-9a-f-]+)"/g)].map((m) => m[1]));
 
   eq("the bridge's demo house was found", known.size > 0, true);
   const missing = Model.DEMO_DEFAULT_FAVORITES.filter((id) => !known.has(id));
@@ -244,116 +203,65 @@ section("demo starter picks match the demo house", () => {
 
 section("control classification", () => {
   eq("light is a toggle", Model.controlKind(entity("light.a", "on")), "toggle");
-  eq("humidifier is a toggle", Model.controlKind(entity("humidifier.a", "on")), "toggle");
-  eq("climate with turn-off support is a toggle",
-     Model.controlKind(entity("climate.a", "heat", { supported_features: 128 })),
-     "toggle");
-  eq("climate without the required turn-off support is not a toggle",
-     Model.controlKind(entity("climate.a", "heat", { supported_features: 256 })),
-     "none");
+  eq("switch is a toggle", Model.controlKind(entity("switch.a", "on")), "toggle");
   eq("lock is its own kind", Model.controlKind(entity("lock.a", "locked")), "lock");
-  eq("scene is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
-  eq("script is one-shot", Model.controlKind(entity("script.a", "off")), "activate");
+  eq("a pushbutton is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
+  eq("a Loxone room controller has no primary toggle",
+     Model.controlKind(entity("climate.a", "auto")), "none");
+  eq("a cover has no primary toggle either — it always expands instead",
+     Model.controlKind(entity("cover.a", "closed")), "none");
   eq("sensor has no control", Model.controlKind(entity("sensor.a", "5")), "none");
 
   eq("a dimmable light expands",
-     Model.isExpandable(entity("light.a", "on",
-       { supported_color_modes: ["brightness"] })), true);
+     Model.isExpandable(entity("light.a", "on", { brightness: 40 })), true);
   eq("a plain light does not",
-     Model.isExpandable(entity("light.a", "on", { supported_color_modes: ["onoff"] })),
-     false);
+     Model.isExpandable(entity("light.a", "on")), false);
   eq("climate with a reported target expands",
-     Model.isExpandable(entity("climate.a", "heat",
-       { supported_features: 1, temperature: 22 })), true);
-  eq("climate without a target control does not expand",
-     Model.isExpandable(entity("climate.a", "heat")), false);
-  eq("cover with open support expands",
-     Model.isExpandable(entity("cover.a", "open", { supported_features: 1 })), true);
-  eq("cover without advertised actions does not expand",
-     Model.isExpandable(entity("cover.a", "open", { supported_features: 0 })), false);
+     Model.isExpandable(entity("climate.a", "auto", { temperature: 22 })), true);
+  eq("climate without a target does not expand",
+     Model.isExpandable(entity("climate.a", "auto")), false);
+  eq("a cover never expands — its up/stop/down buttons sit inline on the row",
+     Model.isExpandable(entity("cover.a", "open")), false);
   eq("sensor does not", Model.isExpandable(entity("sensor.a", "5")), false);
-  // Every expandable domain must have a control to expand into; EntityRow maps
-  // them by hand, and a camera has none.
-  eq("camera does not expand onto an empty panel",
-     Model.isExpandable(entity("camera.a", "streaming")), false);
 });
 
 section("entity capabilities", () => {
-  const media = Model.capabilitiesFor(entity("media_player.a", "playing", {
-    supported_features: 1 | 4 | 32,
-    volume_level: 0.4
-  }));
-  eq("media exposes only advertised previous", media.mediaPrevious, false);
-  eq("media exposes advertised play/pause", media.mediaPlayPause, true);
-  eq("media exposes advertised next", media.mediaNext, true);
-  eq("media exposes volume only with feature and value", media.mediaVolume, true);
+  const cover = Model.capabilitiesFor(entity("cover.a", "closed"));
+  eq("cover always offers open", cover.coverOpen, true);
+  eq("cover always offers stop", cover.coverStop, true);
+  eq("cover always offers close", cover.coverClose, true);
 
-  const noLevel = Model.capabilitiesFor(entity("media_player.a", "idle", {
-    supported_features: 4
-  }));
-  eq("volume isn't synthesized without a reported level", noLevel.mediaVolume, false);
+  const unavailableCover = Model.capabilitiesFor(entity("cover.a", "unavailable"));
+  eq("an unavailable cover disables its controls", unavailableCover.expandable, false);
+  eq("an unavailable cover has no actions either",
+     [unavailableCover.coverOpen, unavailableCover.coverStop, unavailableCover.coverClose],
+     [false, false, false]);
 
-  const cover = Model.capabilitiesFor(entity("cover.a", "closed", {
-    supported_features: 1 | 2
-  }));
-  eq("cover advertises open", cover.coverOpen, true);
-  eq("cover advertises close", cover.coverClose, true);
-  eq("cover hides stop when unsupported", cover.coverStop, false);
+  const climate = Model.capabilitiesFor(entity("climate.a", "auto", { temperature: 22 }));
+  eq("a reported comfort target is writable", climate.climateTarget, true);
+  eq("climate never claims a low/high band Loxone does not have",
+     climate.climateRange, false);
 
-  const range = Model.capabilitiesFor(entity("climate.a", "heat", {
-    supported_features: 2, target_temp_low: 18, target_temp_high: 24
-  }));
-  eq("climate range is supported", range.climateRange, true);
-  eq("range doesn't imply a single target", range.climateTarget, false);
+  const missingTarget = Model.capabilitiesFor(entity("climate.a", "auto"));
+  eq("a missing live target isn't invented", missingTarget.climateTarget, false);
+  eq("but the row still reserves its expansion slot",
+     missingTarget.reserveExpandSlot, true);
+  eq("and does not show an empty expander",
+     missingTarget.expandable, false);
 
-  const missingRange = Model.capabilitiesFor(entity("climate.a", "heat", {
-    supported_features: 2
-  }));
-  eq("a missing target range isn't invented", missingRange.climateRange, false);
-  eq("a missing live climate target still reserves stable row geometry",
-     missingRange.reserveExpandSlot, true);
-  eq("a missing live climate target does not enable empty controls",
-     missingRange.expandable, false);
-
-  const climateOn = Model.capabilitiesFor(entity("climate.a", "heat", {
-    supported_features: 1 | 128 | 256, temperature: 22
-  }));
-  eq("an active climate entity exposes turn off", climateOn.toggle, true);
-
-  const climateOff = Model.capabilitiesFor(entity("climate.a", "off", {
-    supported_features: 1 | 128 | 256, temperature: 22
-  }));
-  eq("an off climate entity exposes turn on", climateOff.toggle, true);
-
-  const oneWayClimate = Model.capabilitiesFor(entity("climate.a", "off", {
-    supported_features: 128
-  }));
-  eq("climate does not invent an unsupported turn-on action",
-     oneWayClimate.toggle, false);
-
-  const unavailable = Model.capabilitiesFor(entity("cover.a", "unavailable", {
-    supported_features: 1 | 2 | 8
-  }));
-  eq("unavailable controls are disabled", unavailable.expandable, false);
-  eq("scenes remain activatable despite unknown state",
+  eq("pushbuttons remain activatable despite an unknown state",
      Model.capabilitiesFor(entity("scene.a", "unknown")).activate, true);
+
+  const lock = Model.capabilitiesFor(entity("lock.a", "locked"));
+  eq("lock exposes its own capability, not a toggle", [lock.lock, lock.toggle],
+     [true, false]);
 });
 
-section("service calls", () => {
-  eq("a light on turns off",
-     Model.toggleCall(entity("light.a", "on"), true), { domain: "light", service: "turn_off" });
-  eq("a light off turns on",
-     Model.toggleCall(entity("light.a", "off"), false), { domain: "light", service: "turn_on" });
-  eq("an active climate entity turns off through its own domain",
-     Model.toggleCall(entity("climate.a", "heat", { supported_features: 128 }), true),
-     { domain: "climate", service: "turn_off" });
-  eq("an off climate entity turns on through its own domain",
-     Model.toggleCall(entity("climate.a", "off", { supported_features: 256 }), false),
-     { domain: "climate", service: "turn_on" });
-  // Anything outside the known list still gets a sensible attempt.
-  eq("an unknown domain falls back",
-     Model.toggleCall(entity("water_heater.a", "on"), true),
-     { domain: "homeassistant", service: "toggle" });
+section("commands", () => {
+  eq("on turns off", Model.toggleCall(entity("light.a", "on"), true),
+     { command: "off" });
+  eq("off turns on", Model.toggleCall(entity("light.a", "off"), false),
+     { command: "on" });
 });
 
 section("icons", () => {
@@ -380,28 +288,35 @@ section("icons", () => {
 });
 
 section("attribute redaction", () => {
-  // `omarchy-shell hass entityState ...` output is what people paste into bug
-  // reports. Home Assistant puts a live camera access token and a signed
-  // picture URL directly into the attribute map.
-  const camera = Model.redactAttributes(entity("camera.drive", "streaming", {
-    friendly_name: "Driveway",
-    access_token: "1f3c9d0e5b",
-    entity_picture: "/api/camera_proxy/camera.drive?token=1f3c9d0e5b"
-  }));
-  eq("camera access token is redacted", camera.access_token, "[redacted]");
-  eq("signed picture URL is redacted", camera.entity_picture, "[redacted]");
-  eq("ordinary attributes survive", camera.friendly_name, "Driveway");
-
-  const tracker = Model.redactAttributes(entity("device_tracker.phone", "home", {
-    latitude: 52.2297, longitude: 21.0122, gps_accuracy: 12, battery_level: 80
-  }));
-  eq("coordinates are redacted",
-     [tracker.latitude, tracker.longitude, tracker.gps_accuracy],
-     ["[redacted]", "[redacted]", "[redacted]"]);
-  eq("unrelated telemetry survives", tracker.battery_level, 80);
-
   eq("an entity with no attributes redacts to an empty object",
      Model.redactAttributes(null), {});
+  eq("ordinary attributes survive untouched",
+     Model.redactAttributes(entity("sensor.a", "5", { unit_of_measurement: "lx" })),
+     { unit_of_measurement: "lx" });
+});
+
+section("search", () => {
+  eq("matches the friendly name",
+     Model.searchMatches("desk", entity("light.a", "on", { friendly_name: "Desk Lamp" })),
+     true);
+  eq("matches the entity id",
+     Model.searchMatches("1234", entity("light.abcd1234-0000-0000-0000000000000001", "on")),
+     true);
+  eq("an empty query matches everything",
+     Model.searchMatches("", entity("light.a", "on")), true);
+  eq("no match is no match",
+     Model.searchMatches("nope", entity("light.a", "on", { friendly_name: "Desk" })),
+     false);
+  // Loxone repeats control names across rooms constantly ("Jalousie" in
+  // every room with a blind), so the room name is searchable too.
+  eq("matches the room name when the caller has one",
+     Model.searchMatches("empore", entity("light.a", "on", { friendly_name: "Jalousie" }),
+       "Empore"),
+     true);
+  eq("a room match doesn't override a real mismatch on name/id",
+     Model.searchMatches("kitchen",
+       entity("light.a", "on", { friendly_name: "Jalousie" }), "Empore"),
+     false);
 });
 
 console.log();

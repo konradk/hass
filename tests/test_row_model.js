@@ -25,52 +25,54 @@ function eq(label, actual, expected) {
 }
 
 console.log("row model projection");
-const entity = {
-  entity_id: "cover.garage",
+const cover = {
+  entity_id: "cover.a1b2c3d4-0000-0000-0000000000000001",
   state: "closed",
-  attributes: { friendly_name: "Garage", supported_features: 1 | 2 }
+  attributes: { friendly_name: "Garage", position: 0 }
 };
-const row = Rows.project(entity.entity_id, entity, {
+const row = Rows.project(cover.entity_id, cover, {
   name: "Main garage",
   icon: "X",
   isOn: false,
   pending: true,
   temperatureUnit: "°C",
-  entityArea: { "cover.garage": "outside" },
+  entityArea: { [cover.entity_id]: "outside" },
   areaNames: { outside: "Outside" }
 }, Model);
 eq("display context is projected", [row.name, row.icon, row.areaName],
    ["Main garage", "X", "Outside"]);
-eq("capabilities control expansion", row.expandable, true);
+eq("a cover never expands — up/stop/down sit inline on the row instead",
+   row.expandable, false);
 eq("a cover has no primary toggle", row.control, "none");
 eq("optimistic state reaches the row", [row.isOn, row.pending], [false, true]);
 
 const climate = {
-  entity_id: "climate.hallway",
-  state: "heat",
-  attributes: { supported_features: 1 | 128 | 256, temperature: 22 }
+  entity_id: "climate.a1b2c3d4-0000-0000-0000000000000002",
+  state: "auto",
+  attributes: { temperature: 22 }
 };
 const climateRow = Rows.project(climate.entity_id, climate, {
   name: "Hallway", icon: "T", isOn: true, pending: false,
   temperatureUnit: "°C", entityArea: {}, areaNames: {}
 }, Model);
-eq("climate turn-on/off support projects a primary toggle",
-   climateRow.control, "toggle");
-eq("climate keeps its temperature expansion", climateRow.expandable, true);
+eq("a Loxone room controller has no primary toggle — no `off` to send",
+   climateRow.control, "none");
+eq("a reported comfort target keeps the temperature expansion",
+   climateRow.expandable, true);
 
 const climateWithoutTarget = {
-  entity_id: "climate.hallway",
-  state: "off",
-  attributes: { supported_features: 1 | 128 | 256, current_temperature: 21 }
+  entity_id: "climate.a1b2c3d4-0000-0000-0000000000000002",
+  state: "auto",
+  attributes: {}
 };
 const offClimateRow = Rows.project(climateWithoutTarget.entity_id,
   climateWithoutTarget, {
     name: "Hallway", icon: "T", isOn: false, pending: false,
     temperatureUnit: "°C", entityArea: {}, areaNames: {}
   }, Model);
-eq("off climate without a target keeps an expansion slot",
+eq("a room controller with no live target yet keeps an expansion slot",
    offClimateRow.reserveExpandSlot, true);
-eq("off climate without a target does not expose an empty expander",
+eq("it does not expose an empty expander before the target arrives",
    offClimateRow.expandable, false);
 
 const missing = Rows.project("light.missing", null, {

@@ -65,7 +65,7 @@ for path in QML_FILES:
     source = open(path, encoding="utf-8").read()
     for line, block in blocks(source, "Text"):
         # Qt's default is AutoText, which sniffs for markup and renders it as
-        # rich text. Entity names come from Home Assistant and overrides come
+        # rich text. Entity names come from the Miniserver and overrides come
         # from config.json, so a device called `<img src="http://…">` would
         # fetch it on render. Nothing here ever wants markup.
         check("textFormat: Text.PlainText" in block,

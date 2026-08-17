@@ -10,7 +10,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVICE_PATH = os.path.join(ROOT, "Service.qml")
 CREDENTIALS_PATH = os.path.join(ROOT, "CredentialManager.qml")
-BRIDGE_PATH = os.path.join(ROOT, "bin", "hass-bridge")
+BRIDGE_PATH = os.path.join(ROOT, "bin", "loxone-bridge")
 MANIFEST_PATH = os.path.join(ROOT, "manifest.json")
 
 service = open(SERVICE_PATH, encoding="utf-8").read()
@@ -47,33 +47,28 @@ def function_block(name):
 def main():
     print("service: credential and connection lifecycle invariants")
     current_config = function_block("currentConfig")
-    check("config serialization never contains a token",
-          "token" not in current_config.lower())
+    check("config serialization never contains a password",
+          "password" not in current_config.lower())
     check("keyring entries are scoped by normalized origin",
-          credentials.count('"service", "hass", "origin", root.') >= 3)
-    check("the legacy unscoped token is lookup-only",
-          credentials.count('"account", "token"') == 1
-          and "legacyProcess" in credentials)
+          credentials.count('"service", "loxone", "origin", root.') >= 3)
 
     process_start = credentials.find("property Process storeProcess")
     started = credentials.find("onStarted:", process_start)
     write = credentials.find("storeProcess.write", process_start)
     exited = credentials.find("onExited:", process_start)
-    check("token is written only after secret-tool starts",
+    check("password is written only after secret-tool starts",
           process_start >= 0 and process_start < started < write < exited)
     check("reusing the store process restores stdin before launch",
           "storeProcess.stdinEnabled = true" in credentials)
-    check("token draft is cleared on terminal paths",
-          credentials.count('root.writeToken = ""') >= 2)
-    check("keyring readers don't retain collector copies of tokens",
+    check("password draft is cleared on terminal paths",
+          credentials.count('root.writePassword = ""') >= 2)
+    check("keyring readers don't retain collector copies of passwords",
           "StdioCollector" not in credentials
-          and 'root.lookupToken = ""' in credentials
-          and "legacyTokenSeen" in credentials)
+          and 'root.lookupPassword = ""' in credentials)
     check("keyring process launch has a timeout",
           "writeStartTimeout" in credentials
           and "clearStartTimeout" in credentials
-          and "lookupStartTimeout" in credentials
-          and "legacyStartTimeout" in credentials)
+          and "lookupStartTimeout" in credentials)
     check("credential processes live outside the service",
           "CredentialManager" in service and "secret-tool" not in service)
 
@@ -102,10 +97,8 @@ def main():
     settings = open(os.path.join(ROOT, "Settings.qml"), encoding="utf-8").read()
     check("IPC never prints a raw attribute map",
           "JSON.stringify(entity.attributes)" not in panel
-          and "Model.redactAttributes" in panel
-          and "access_token" in open(os.path.join(ROOT, "Model.js"),
-                                     encoding="utf-8").read())
-    check("plaintext connection URLs show an explicit token warning",
+          and "Model.redactAttributes" in panel)
+    check("plaintext connection URLs show an explicit credential warning",
           'indexOf("http://")' in settings
           and 'indexOf("ws://")' in settings
           and "without transport encryption" in settings)
@@ -114,22 +107,30 @@ def main():
           and "property Timer credentialRetry" in service)
 
     check("domain actions validate entity capabilities",
-          service.count("root.capabilities(entityId)") >= 7
+          service.count("root.capabilities(entityId)") >= 6
           and "Model.capabilitiesFor(entity)" in service)
     check("selected tab persistence is debounced",
           "selectedTabSaveDebounce.restart()" in service)
 
-    check("bridge never accepts the token in argv",
-          "access_token" in bridge and '"--token"' not in bridge)
-    check("bridge disables environment proxies explicitly",
-          "proxy=None" in bridge)
-    check("custom WebSocket parser isn't present",
-          "class WebSocket:" not in bridge and "def ws_connect(" not in bridge)
+    check("bridge never accepts the password in argv",
+          '"--password"' not in bridge and '"-p"' not in bridge)
+    check("bridge redacts the password from error text and logs",
+          "def redact(" in bridge and "self.safe_error" in bridge)
+    check("the WebSocket token handshake uses no third-party crypto library",
+          "import rsa" not in bridge and "pycryptodome" not in bridge
+          and "cryptography" not in bridge and "Crypto" not in bridge)
+    check("live push is a best-effort enhancement, not a hard requirement",
+          "LivePushThread" in bridge
+          and "except Exception as exc:  # noqa: BLE001 — best-effort" in bridge)
+    check("the acquired token is never persisted to disk",
+          "token.json" not in bridge and "TokenStore" not in bridge)
+    check("bridge blocks cross-Miniserver redirects",
+          "Blocked a redirect" in bridge)
 
     try:
         manifest = json.load(open(MANIFEST_PATH, encoding="utf-8"))
         valid_manifest = (manifest.get("schemaVersion") == 1
-                          and manifest.get("id") == "hass"
+                          and manifest.get("id") == "loxone"
                           and set(manifest.get("entryPoints", {}))
                           == {"service", "barWidget", "overlay"})
     except (OSError, ValueError):

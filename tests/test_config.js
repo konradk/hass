@@ -20,44 +20,69 @@ function eq(label, actual, expected) {
   }
 }
 
+const LIGHT = "light.11111111-0000-0000-0000000000000001";
+
 console.log("configuration normalization and serialization");
-const invalid = Config.parse("{broken", ["light.demo"]);
+const invalid = Config.parse("{broken", [LIGHT]);
 eq("invalid JSON is reported", invalid.error, "config.json is not valid JSON");
-eq("invalid config keeps safe demo defaults", invalid.config.demoFavorites,
-   ["light.demo"]);
+eq("invalid config keeps safe demo defaults", invalid.config.demoFavorites, [LIGHT]);
 
 const parsed = Config.parse(JSON.stringify({
   baseUrl: 7,
+  username: 3,
+  verifyTls: "yes",
   demoMode: true,
-  favorites: ["light.a", 4, "", "light.a"],
+  favorites: [LIGHT, 4, "", LIGHT, "light.tooshort"],
   demoFavorites: [],
   showEntityIcons: false,
-  displayNameOverrides: { "light.a": "Desk", bad: 4 },
+  displayNameOverrides: { [LIGHT]: "Desk", bad: 4 },
   iconOverrides: [],
   selectedTab: "area:kitchen"
-}), ["light.demo"]);
+}), [LIGHT]);
 eq("typed values are normalized", parsed.config, {
   baseUrl: "",
+  username: "",
+  verifyTls: false,
   demoMode: true,
-  favorites: ["light.a"],
+  favorites: [LIGHT],
   demoFavorites: [],
   groupByArea: false,
   showEntityIcons: false,
   selectedTab: "area:kitchen",
-  displayNameOverrides: { "light.a": "Desk" },
-  iconOverrides: {}
+  displayNameOverrides: { [LIGHT]: "Desk" },
+  iconOverrides: {},
+  cameraUrl: "",
+  cameraUsername: "",
+  cameraVerifyTls: false
 });
+
+const withCreds = Config.parse(JSON.stringify({
+  baseUrl: "https://192.168.1.77", username: "admin", verifyTls: true
+}), []);
+eq("username and verifyTls survive a round trip",
+   [withCreds.config.baseUrl, withCreds.config.username, withCreds.config.verifyTls],
+   ["https://192.168.1.77", "admin", true]);
+
+const withCamera = Config.parse(JSON.stringify({
+  cameraUrl: "https://192.168.1.50/mjpg/video.cgi",
+  cameraUsername: "cam", cameraVerifyTls: 1
+}), []);
+eq("camera fields survive a round trip, and typed strictly",
+   [withCamera.config.cameraUrl, withCamera.config.cameraUsername,
+    withCamera.config.cameraVerifyTls],
+   ["https://192.168.1.50/mjpg/video.cgi", "cam", false]);
 
 const merged = Config.merge(parsed.config, {
   groupByArea: true,
-  token: "must-not-be-serialized",
+  password: "must-not-be-serialized",
   unknown: "ignored"
 });
 eq("known keys merge", merged.groupByArea, true);
-eq("unknown and secret keys are dropped", merged.token, undefined);
+eq("unknown and secret keys are dropped", merged.password, undefined);
 eq("serialized config has one trailing newline",
    Config.serialize(merged).endsWith("}\n"), true);
-eq("serialized config contains no token", Config.serialize(merged).includes("token"), false);
+eq("serialized config contains no password",
+   Config.serialize(merged).includes("password"), false);
 
 console.log();
 if (failures) {

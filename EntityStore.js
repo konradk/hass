@@ -1,11 +1,15 @@
 .pragma library
 
-// Stateless projection of Home Assistant payloads into the indexes consumed
-// by Service.qml. Transport lifecycle and QML model mutation stay in the
+// Stateless projection of Loxone bridge payloads into the indexes consumed by
+// Service.qml. Transport lifecycle and QML model mutation stay in the
 // service; data normalization is kept here and covered without Quickshell.
 
+// entity_id is "<domain>.<uuid>" — a Loxone control UUID keeps its hyphens, so
+// this is looser than a Home Assistant slug but still anchored: a lowercase
+// domain word, a dot, then only the hex/hyphen characters a Miniserver UUID is
+// made of.
 function validEntityId(value) {
-  return typeof value === "string" && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(value)
+  return typeof value === "string" && /^[a-z_]+\.[0-9a-f-]{8,}$/.test(value)
 }
 
 function safeKey(value) {
@@ -26,10 +30,10 @@ function indexStates(entities) {
 }
 
 // Replacing an entity that is already indexed mutates the map in place and
-// returns it unchanged. A real instance is mostly sensors reporting
-// constantly, and copying every entity per state_changed is O(entities) of
-// pure garbage on the hottest path there is; callers bump stateRevision, which
-// is what actually invalidates the bindings.
+// returns it unchanged. A Miniserver polling several dozen controls is mostly
+// sensors reporting the same value, and copying every entity per poll tick is
+// O(entities) of pure garbage on the hottest path there is; callers bump
+// stateRevision, which is what actually invalidates the bindings.
 //
 // A genuinely new entity still gets a fresh map. That is rare, and it is the
 // only case where the *set* of entities changed — which is what the bindings
@@ -58,22 +62,39 @@ function removeState(states, entityId) {
   return next
 }
 
-function projectRegistries(areas, entities, devices) {
-  var names = {}
-  var areaList = Array.isArray(areas) ? areas : []
-  for (var i = 0; i < areaList.length; i++) {
-    var area = areaList[i]
-    if (area && safeKey(area.area_id)) {
-      names[area.area_id] = String(area.name || area.area_id)
-    }
-  }
+// Small copy-on-write maps keyed by entity id, kept separate from `states`
+// because they are local UI state the bridge never echoes back as part of an
+// entity.
+function withEntry(map, key, value) {
+  if (!safeKey(key)) return map || {}
+  var next = {}
+  var current = map || {}
+  for (var k in current) next[k] = current[k]
+  next[key] = value
+  return next
+}
 
-  var deviceArea = {}
-  var deviceList = Array.isArray(devices) ? devices : []
-  for (var d = 0; d < deviceList.length; d++) {
-    var device = deviceList[d]
-    if (device && safeKey(device.id)) {
-      deviceArea[device.id] = safeKey(device.area_id) ? device.area_id : ""
+function withoutEntry(map, key) {
+  var current = map || {}
+  if (current[key] === undefined) return current
+  var next = {}
+  for (var k in current) {
+    if (k !== key) next[k] = current[k]
+  }
+  return next
+}
+
+// Loxone controls carry their own room UUID directly — there is no separate
+// device registry standing between an entity and its area the way Home
+// Assistant has one, so this is a straight projection of the bridge's rooms
+// list plus each entity's own `area_id` attribute.
+function projectRegistries(rooms, entities) {
+  var names = {}
+  var roomList = Array.isArray(rooms) ? rooms : []
+  for (var i = 0; i < roomList.length; i++) {
+    var room = roomList[i]
+    if (room && safeKey(room.area_id)) {
+      names[room.area_id] = String(room.name || room.area_id)
     }
   }
 
@@ -82,10 +103,7 @@ function projectRegistries(areas, entities, devices) {
   for (var e = 0; e < entityList.length; e++) {
     var entry = entityList[e]
     if (!entry || !validEntityId(entry.entity_id)) continue
-    var ownArea = safeKey(entry.area_id) ? entry.area_id : ""
-    var inheritedArea = safeKey(entry.device_id) ? deviceArea[entry.device_id] : ""
-    var areaId = ownArea || inheritedArea || ""
-    if (areaId) mapping[entry.entity_id] = areaId
+    if (safeKey(entry.area_id)) mapping[entry.entity_id] = entry.area_id
   }
   return { areaNames: names, entityArea: mapping }
 }

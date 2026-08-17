@@ -1,9 +1,15 @@
 .pragma library
 
-// Stateless view logic: raw Home Assistant entities in, drawable values out.
+// Stateless view logic: raw Loxone control entities in, drawable values out.
 // No QML types and no side effects, so it is testable outside the shell.
+//
+// Loxone has no service-bus/feature-bitmask negotiation the way Home Assistant
+// does: what a control can do follows directly from its Loxone control type
+// (Switch, Dimmer, Jalousie, IRoomControllerV2, ...), which the bridge already
+// resolved into one of the domains below. So capability derivation here is
+// domain-driven rather than bit-tested.
 
-var TOGGLEABLE_DOMAINS = ["light", "switch", "fan", "input_boolean", "humidifier"]
+var TOGGLEABLE_DOMAINS = ["light", "switch"]
 
 function attrs(entity) {
   return (entity && entity.attributes) ? entity.attributes : {}
@@ -34,12 +40,15 @@ function stateOf(entity) {
   return entity && typeof entity.state === "string" ? entity.state : ""
 }
 
+// The bridge reports this when a poll fails or a control's Miniserver value
+// cannot be parsed, mirroring the vocabulary Home Assistant users already know.
 function isUnavailable(entity) {
   var state = stateOf(entity)
   return state === "unavailable" || state === "unknown"
 }
 
-// A scene's state is when it last ran, or "unknown" — not a reason to grey it out.
+// A pushbutton's state is when it was last pressed, or "unknown" — not a
+// reason to grey it out.
 function isAvailable(entity) {
   if (!entity) return false
   if (controlKind(entity) === "activate") return true
@@ -48,7 +57,6 @@ function isAvailable(entity) {
 
 function isToggleable(entity) {
   return TOGGLEABLE_DOMAINS.indexOf(domain(entity)) !== -1
-    || climateCanToggle(entity)
 }
 
 function isExpandable(entity) {
@@ -57,22 +65,13 @@ function isExpandable(entity) {
 
 function isOn(entity) {
   var state = stateOf(entity)
-  // A climate entity's state is its HVAC mode, so every real mode except
-  // `off` means the device is on. It never reports the literal state `on`.
-  if (domain(entity) === "climate") {
+  var dom = domain(entity)
+  if (dom === "cover") return state === "open"
+  if (dom === "climate") {
     return state !== "" && state !== "off"
       && state !== "unavailable" && state !== "unknown"
   }
-  return state === "on" || state === "locked" || state === "open"
-}
-
-function isPlaying(entity) {
-  return playbackState(entity) === "playing"
-}
-
-function playbackState(entity) {
-  var explicit = cleaned(attrs(entity).media_playback_state)
-  return (explicit || stateOf(entity)).toLowerCase()
+  return state === "on" || state === "locked"
 }
 
 function capitalize(value) {
@@ -95,121 +94,76 @@ function displayState(entity) {
 function subtitle(entity, unitFallback) {
   var dom = domain(entity)
   if (dom === "climate") return climateSubtitle(entity, unitFallback)
-  if (dom === "media_player") {
-    var media = mediaSubtitle(entity)
-    if (media) return media
-    var state = stateOf(entity)
-    if (state === "playing" || state === "paused") return capitalize(state)
-    return ""
-  }
+  if (dom === "cover") return coverSubtitle(entity)
   if (isToggleable(entity)) return displayState(entity)
   return ""
 }
 
+function coverSubtitle(entity) {
+  var position = attrs(entity).position
+  if (typeof position === "number") {
+    return Math.round(position) + "% open"
+  }
+  var state = stateOf(entity)
+  return state ? capitalize(state) : ""
+}
+
 function badgeText(entity) {
   var dom = domain(entity)
-  if (dom === "scene") return "Scene"
-  if (dom === "camera") return "Camera"
+  if (dom === "scene") return "Trigger"
+  if (dom === "cover") return coverSubtitle(entity) || capitalize(stateOf(entity))
   if (dom === "climate") {
-    // The HVAC mode is the entity's state, not an attribute; `hvac_action` is
-    // the separate, more useful "what is it doing right now" — heating vs idle
-    // while both sit in mode "heat". Falls through to the state without one.
-    var action = cleaned(attrs(entity).hvac_action)
-    if (action) return capitalize(action)
+    var current = attrs(entity).current_temperature
+    if (typeof current === "number") {
+      return formatTemp(current, temperatureUnit(entity)) + " now"
+    }
   }
   if (isUnavailable(entity)) return capitalize(stateOf(entity))
   return displayState(entity)
 }
 
-function mediaSubtitle(entity) {
-  var a = attrs(entity)
-  var title = cleaned(a.media_title)
-  var artist = cleaned(a.media_artist)
-  var album = cleaned(a.media_album_name)
-  var channel = cleaned(a.media_channel)
-
-  if (title) {
-    if (artist) return artist + " — " + title
-    if (album) return title + " — " + album
-    return title
-  }
-  return channel || ""
-}
-
 // ---------------------------------------------------------------- light
 
-// Home Assistant removed SUPPORT_BRIGHTNESS (bit 0) in 2022; a modern light
-// advertises dimming through supported_color_modes. The brightness attribute
-// is not a substitute, because a light that is off reports it as null — which
-// is exactly the moment someone wants the slider.
-var UNDIMMABLE_COLOR_MODES = ["onoff", "unknown"]
-
+// A Loxone Dimmer (or a LightControllerV2 sub-output) reports its position as
+// a live 0-100 percent value; the bridge writes it straight into `brightness`,
+// so unlike Home Assistant there is no 0-255 scale and no separate
+// "supports dimming" flag to test — a reported number is the signal.
 function supportsBrightness(entity) {
-  if (domain(entity) !== "light") return false
-  var modes = attrs(entity).supported_color_modes
-  if (Array.isArray(modes)) {
-    for (var i = 0; i < modes.length; i++) {
-      if (UNDIMMABLE_COLOR_MODES.indexOf(String(modes[i])) === -1) return true
-    }
-    return false
-  }
-  // Pre-2022 instances, and anything that reports a live brightness.
-  var features = attrs(entity).supported_features
-  if (typeof features === "number" && (features & 1) === 1) return true
-  return typeof attrs(entity).brightness === "number"
+  return domain(entity) === "light" && typeof attrs(entity).brightness === "number"
 }
 
 function brightnessPercent(entity) {
   var value = attrs(entity).brightness
   if (typeof value !== "number") return -1
-  return Math.min(Math.max(value / 255.0 * 100.0, 0), 100)
+  return Math.min(Math.max(value, 0), 100)
 }
 
 // ---------------------------------------------------------------- media
+//
+// No Loxone control in this plugin's mapping produces domain `media_player`
+// yet (the Music Server's zone API is a separate integration — see README).
+// These stay defined, and unreachable, so MediaControls.qml and a future
+// zone bridge have something to project onto without every caller needing to
+// special-case "not supported yet".
+
+function isPlaying(entity) {
+  return playbackState(entity) === "playing"
+}
+
+function playbackState(entity) {
+  var explicit = cleaned(attrs(entity).media_playback_state)
+  return (explicit || stateOf(entity)).toLowerCase()
+}
 
 function volumeLevel(entity) {
   var value = attrs(entity).volume_level
   return typeof value === "number" ? value : -1
 }
 
-// Home Assistant EntityFeature values. Keep the constants next to the only
-// projection that interprets them, rather than scattering bit tests across
-// QML controls.
-var MEDIA_PAUSE = 1
-var MEDIA_VOLUME_SET = 4
-var MEDIA_PREVIOUS_TRACK = 16
-var MEDIA_NEXT_TRACK = 32
-var MEDIA_PLAY = 16384
-
-var COVER_OPEN = 1
-var COVER_CLOSE = 2
-var COVER_STOP = 8
-
-var CLIMATE_TARGET_TEMPERATURE = 1
-var CLIMATE_TARGET_TEMPERATURE_RANGE = 2
-var CLIMATE_TURN_OFF = 128
-var CLIMATE_TURN_ON = 256
-
-function featureBits(entity) {
-  var value = attrs(entity).supported_features
-  return typeof value === "number" && isFinite(value) ? Math.floor(value) : 0
-}
-
-function hasFeature(bits, flag) {
-  return (bits & flag) === flag
-}
-
-function climateCanToggle(entity) {
-  if (domain(entity) !== "climate") return false
-  var required = stateOf(entity) === "off" ? CLIMATE_TURN_ON : CLIMATE_TURN_OFF
-  return hasFeature(featureBits(entity), required)
-}
-
 function capabilitiesFor(entity) {
   var dom = domain(entity)
   var a = attrs(entity)
-  var bits = featureBits(entity)
-  var activate = dom === "scene" || dom === "script"
+  var activate = dom === "scene"
   var available = !!entity && (activate || !isUnavailable(entity))
   var result = {
     available: available,
@@ -226,53 +180,41 @@ function capabilitiesFor(entity) {
     coverClose: false,
     climateTarget: false,
     climateRange: false,
+    stream: false,
     expandable: false,
     reserveExpandSlot: false
   }
 
-  if (available && dom === "media_player") {
-    result.mediaPrevious = hasFeature(bits, MEDIA_PREVIOUS_TRACK)
-    result.mediaPlayPause = hasFeature(bits, MEDIA_PAUSE)
-      || hasFeature(bits, MEDIA_PLAY)
-    result.mediaNext = hasFeature(bits, MEDIA_NEXT_TRACK)
-    result.mediaVolume = hasFeature(bits, MEDIA_VOLUME_SET)
-      && typeof a.volume_level === "number"
-  } else if (available && dom === "cover") {
-    result.coverOpen = hasFeature(bits, COVER_OPEN)
-    result.coverStop = hasFeature(bits, COVER_STOP)
-    result.coverClose = hasFeature(bits, COVER_CLOSE)
+  if (available && dom === "cover") {
+    // Jalousie and Gate controls always answer up/stop/down — Loxone does not
+    // negotiate a subset the way Home Assistant's cover feature bitmask does.
+    result.coverOpen = true
+    result.coverStop = true
+    result.coverClose = true
   } else if (available && dom === "climate") {
-    result.climateRange = hasFeature(bits, CLIMATE_TARGET_TEMPERATURE_RANGE)
-      && typeof a.target_temp_low === "number"
-      && typeof a.target_temp_high === "number"
-    result.climateTarget = hasFeature(bits, CLIMATE_TARGET_TEMPERATURE)
-      && typeof a.temperature === "number"
+    result.climateTarget = typeof a.temperature === "number"
   }
 
-  result.expandable = result.brightness
-    || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
-    || result.mediaVolume || result.coverOpen || result.coverStop
-    || result.coverClose || result.climateTarget || result.climateRange
-  // Climate integrations commonly clear the live target while the device is
-  // off. Keep the row geometry stable without pretending there is a target
-  // value to edit: the chevron remains hidden/disabled until controls are
-  // usable, but its slot is already reserved.
-  result.reserveExpandSlot = result.expandable
-    || (!!entity && dom === "climate"
-      && (hasFeature(bits, CLIMATE_TARGET_TEMPERATURE)
-        || hasFeature(bits, CLIMATE_TARGET_TEMPERATURE_RANGE)))
+  // Cover deliberately does not contribute to expandable: its up/stop/down
+  // buttons sit inline on the row itself (EntityRow), not behind a chevron —
+  // a Jalousie is not a control anyone wants to tap twice to move.
+  result.expandable = result.brightness || result.climateTarget
+  // A room controller commonly has no live target yet right after connecting.
+  // Keep the row geometry stable without pretending there is a value to edit.
+  result.reserveExpandSlot = result.expandable || (!!entity && dom === "climate")
   return result
 }
 
 // ---------------------------------------------------------------- climate
 
-// `climate` entities carry no unit of their own — the instance decides, and
-// the bridge reports it from get_config. `fallback` is that value; the entity
-// attributes are still checked first, for the domains that do declare one.
+// IRoomControllerV2 always works in Celsius; there is no instance-wide unit
+// setting to fetch the way Home Assistant's get_config carries one. The
+// `fallback` parameter still exists so callers (and their tests) can pass one,
+// but Model itself has nothing to negotiate.
 function temperatureUnit(entity, fallback) {
   var a = attrs(entity)
   return cleaned(a.temperature_unit) || cleaned(a.unit_of_measurement)
-    || cleaned(fallback) || ""
+    || cleaned(fallback) || "°C"
 }
 
 function formatTemp(value, unit) {
@@ -284,20 +226,12 @@ function formatTemp(value, unit) {
   return unit ? text + unit : text
 }
 
-function hasTargetRange(entity) {
-  var a = attrs(entity)
-  return typeof a.target_temp_low === "number" && typeof a.target_temp_high === "number"
-}
-
 function climateSubtitle(entity, unitFallback) {
   var a = attrs(entity)
   var unit = temperatureUnit(entity, unitFallback)
   var parts = []
 
-  if (hasTargetRange(entity)) {
-    parts.push("Target " + formatTemp(a.target_temp_low, unit)
-      + "–" + formatTemp(a.target_temp_high, unit))
-  } else if (typeof a.temperature === "number") {
+  if (typeof a.temperature === "number") {
     parts.push("Target " + formatTemp(a.temperature, unit))
   }
   if (typeof a.current_temperature === "number") {
@@ -306,12 +240,11 @@ function climateSubtitle(entity, unitFallback) {
   return parts.join(" · ")
 }
 
-// Home Assistant publishes the increment the thermostat actually accepts;
-// deriving one from the unit is a guess, and only right by coincidence.
+// The comfort-temperature step Loxone's own app uses.
 function temperatureStep(entity, unitFallback) {
   var declared = attrs(entity).target_temp_step
   if (typeof declared === "number" && declared > 0) return declared
-  return temperatureUnit(entity, unitFallback).indexOf("F") !== -1 ? 1.0 : 0.5
+  return 0.5
 }
 
 function temperatureRange(entity, unitFallback) {
@@ -320,45 +253,33 @@ function temperatureRange(entity, unitFallback) {
       && a.min_temp < a.max_temp) {
     return { min: a.min_temp, max: a.max_temp }
   }
-  return temperatureUnit(entity, unitFallback).indexOf("F") !== -1
-    ? { min: 50, max: 90 }
-    : { min: 5, max: 35 }
+  return { min: 5, max: 35 }
 }
 
-function climateTemperatureData(entity, target, low, high, unitFallback) {
+function climateTemperatureData(entity, target, unitFallback) {
   var caps = capabilitiesFor(entity)
   var range = temperatureRange(entity, unitFallback)
   var data = {}
   if (typeof target === "number" && isFinite(target) && caps.climateTarget) {
     data.temperature = Math.max(range.min, Math.min(range.max, target))
   }
-  if (typeof low === "number" && isFinite(low)
-      && typeof high === "number" && isFinite(high)
-      && caps.climateRange) {
-    var clampedLow = Math.max(range.min, Math.min(range.max, low))
-    var clampedHigh = Math.max(range.min, Math.min(range.max, high))
-    data.target_temp_low = Math.min(clampedLow, clampedHigh)
-    data.target_temp_high = Math.max(clampedLow, clampedHigh)
-  }
   return data
 }
 
 // ---------------------------------------------------------------- icons
 
-// Material Design Icons, as in Home Assistant's own `mdi:` hints. Codepoints
-// were read from the Nerd Font by glyph name; a wrong one renders as a box.
+// Material Design Icons, as codepoints from the Nerd Font by glyph name; a
+// wrong one renders as a box. Every glyph here is reused from a spot in this
+// file already known to render, rather than a freshly guessed codepoint.
 var DEVICE_CLASS_ICONS = {
   "garage": "󰛙",               // md-garage
   "door": "󰠚",                 // md-door
   "window": "󰖮",               // md-window_closed
   "shutter": "󱄜",              // md-window_shutter
-  "blind": "󰂬",                // md-blinds
-  "curtain": "󱡆",              // md-curtains
+  "blind": "󱄜",                // md-window_shutter
   "motion": "󰶑",               // md-motion_sensor
   "temperature": "󰔏",          // md-thermometer
   "humidity": "󰖎",             // md-water_percent
-  "tv": "󰔂",                   // md-television
-  "speaker": "󰓃",              // md-speaker
   "battery": "󰁹",              // md-battery
   "power": "󰉁",                // md-flash
   "outlet": "󰚥"                // md-power_plug
@@ -367,27 +288,17 @@ var DEVICE_CLASS_ICONS = {
 var DOMAIN_ICONS = {
   "light": "󰌵",                // md-lightbulb
   "switch": "󰔡",               // md-toggle_switch
-  "fan": "󰈐",                  // md-fan
-  "input_boolean": "󰨚",        // md-toggle_switch_outline
-  "humidifier": "󱂙",           // md-air_humidifier
   "climate": "󰎓",              // md-thermostat
-  "media_player": "󰝚",         // md-music
   "cover": "󱄜",                // md-window_shutter
   "lock": "󰌾",                 // md-lock
   "scene": "󰏘",                // md-palette
-  "camera": "󰞮",               // md-cctv
   "sensor": "󰊚",               // md-gauge
-  "binary_sensor": "󰶑",        // md-motion_sensor
-  "automation": "󰚩",           // md-robot
-  "script": "󰯂",               // md-script_text
-  "vacuum": "󰜍",               // md-robot_vacuum
-  "person": "󰀄",               // md-account
-  "weather": "󰖕"               // md-weather_partly_cloudy
+  "binary_sensor": "󰶑"         // md-motion_sensor
 }
 
 var FALLBACK_ICON = "󰾰"          // md-devices
 
-var BRAND_ICON = "󰟐"             // md-home_assistant
+var BRAND_ICON = "󰋜"             // md-home
 
 function iconFor(entity) {
   var dom = domain(entity)
@@ -404,16 +315,12 @@ function iconFor(entity) {
   return DOMAIN_ICONS[dom] || FALLBACK_ICON
 }
 
-// ---------------------------------------------------------------- service calls
+// ---------------------------------------------------------------- commands
 
-// Own turn_on/turn_off where the domain has them, so Home Assistant applies
-// its semantics; otherwise homeassistant.toggle.
+// A toggle sends the Loxone `on`/`off` command directly; there is no
+// domain/service pair to look up the way Home Assistant has one.
 function toggleCall(entity, currentlyOn) {
-  var dom = domain(entity)
-  if (isToggleable(entity)) {
-    return { domain: dom, service: currentlyOn ? "turn_off" : "turn_on" }
-  }
-  return { domain: "homeassistant", service: "toggle" }
+  return { command: currentlyOn ? "off" : "on" }
 }
 
 // "toggle" | "lock" (switch calling lock/unlock) | "activate" (one-shot) | "none".
@@ -421,23 +328,21 @@ function controlKind(entity) {
   var dom = domain(entity)
   if (isToggleable(entity)) return "toggle"
   if (dom === "lock") return "lock"
-  if (dom === "scene" || dom === "script") return "activate"
+  if (dom === "scene") return "activate"
   return "none"
 }
 
-// Seed picks for demo mode. Ids also live in bin/hass-bridge; test_model.js
+// Seed picks for demo mode. Ids also live in bin/loxone-bridge; test_model.js
 // checks these stay a subset.
 var DEMO_DEFAULT_FAVORITES = [
-  "light.living_room_lamp",
-  "fan.living_room_ceiling_fan",
-  "climate.living_room_thermostat",
-  "media_player.living_room_tv",
-  "scene.living_room_movie_night",
-  "light.kitchen_pendant",
-  "switch.kitchen_coffee_maker",
-  "sensor.kitchen_temperature",
-  "cover.garage_door",
-  "lock.garage_side_door"
+  "light.5b93f8a1-0001-0001-0000000000001",
+  "switch.5b93f8a1-0002-0001-0000000000002",
+  "climate.5b93f8a1-0003-0001-0000000000003",
+  "scene.5b93f8a1-0004-0001-0000000000004",
+  "light.5b93f8a1-0005-0001-0000000000005",
+  "sensor.5b93f8a1-0006-0001-0000000000006",
+  "cover.5b93f8a1-0007-0001-0000000000007",
+  "lock.5b93f8a1-0008-0001-0000000000008"
 ]
 
 // Scoped to picked devices, so the count stays verifiable. Locks excluded:
@@ -446,35 +351,21 @@ function activitySummary(entities) {
   if (!entities || entities.length === 0) return "No devices picked"
 
   var on = 0
-  var playing = ""
-  var playingCount = 0
-
   for (var i = 0; i < entities.length; i++) {
     var entity = entities[i]
     if (!entity) continue
     if (isToggleable(entity) && isOn(entity)) on++
-    if (domain(entity) === "media_player" && isPlaying(entity)) {
-      playingCount++
-      if (!playing) playing = name(entity)
-    }
   }
 
-  var parts = []
-  if (on > 0) parts.push(on + " on")
-  if (playingCount === 1) parts.push(playing + " playing")
-  else if (playingCount > 1) parts.push(playingCount + " playing")
-
-  return parts.length ? parts.join(" · ") : "All off"
+  return on > 0 ? on + " on" : "All off"
 }
 
-// Settings browser buckets. No "Cameras" until cameras ship.
+// Settings browser buckets.
 var DOMAIN_FILTERS = [
   { id: "all", title: "All", domains: [] },
   { id: "lights", title: "Lights", domains: ["light"] },
-  { id: "controls", title: "Controls",
-    domains: ["switch", "fan", "input_boolean", "humidifier", "lock", "scene", "script"] },
+  { id: "controls", title: "Controls", domains: ["switch", "lock", "scene"] },
   { id: "climate", title: "Climate", domains: ["climate"] },
-  { id: "media", title: "Media", domains: ["media_player"] },
   { id: "covers", title: "Covers", domains: ["cover"] },
   { id: "sensors", title: "Sensors", domains: ["sensor", "binary_sensor"] }
 ]
@@ -489,15 +380,12 @@ function filterMatches(filterId, entity) {
   return true
 }
 
-// Attribute names whose value is a credential or a location rather than a
-// state worth reading. Home Assistant puts a live camera `access_token` and a
-// signed `entity_picture` straight into the attribute map, so anything that
-// prints attributes for a human — the IPC inspector, any future debug dump —
-// has to go through here first.
-var REDACTED_ATTRIBUTES = [
-  "access_token", "entity_picture", "entity_picture_local", "token",
-  "latitude", "longitude", "gps_accuracy"
-]
+// Attribute names whose value would be a credential or a precise location
+// rather than a state worth reading, kept for defense in depth: the IPC
+// inspector and any future debug dump go through here before printing
+// anything. Loxone's own structure data does not currently carry either kind
+// of attribute, so the list is empty rather than guessed at.
+var REDACTED_ATTRIBUTES = []
 
 function redactAttributes(entity) {
   var source = attrs(entity)
@@ -509,10 +397,13 @@ function redactAttributes(entity) {
   return out
 }
 
-// Matches the friendly name and the entity id.
-function searchMatches(query, entity) {
+// Matches the friendly name, the entity id, and — since Loxone repeats
+// control names across rooms constantly ("Jalousie" in every room with a
+// blind) — the room name, when the caller has one to offer.
+function searchMatches(query, entity, roomName) {
   var needle = String(query || "").trim().toLowerCase()
   if (!needle) return true
   return name(entity).toLowerCase().indexOf(needle) !== -1
     || String(entity.entity_id).toLowerCase().indexOf(needle) !== -1
+    || (!!roomName && String(roomName).toLowerCase().indexOf(needle) !== -1)
 }
