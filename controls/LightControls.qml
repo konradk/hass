@@ -51,8 +51,10 @@ Column {
     // On release only: a call per pixel floods Home Assistant and makes the
     // light stutter trying to follow.
     onReleased: function(value) {
-      pendingBrightness.commit(value)
-      control.hass.setBrightness(control.entityId, value)
+      // setBrightness sends whole percent; the value held on screen must match.
+      var percent = Math.round(value)
+      pendingBrightness.commit(percent)
+      control.hass.setBrightness(control.entityId, percent)
     }
     onCanceled: pendingBrightness.clear()
   }

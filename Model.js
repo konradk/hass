@@ -331,6 +331,31 @@ function volumeSettled(entity, level) {
   return settledWithin(volumeLevel(entity), level, 0.01)
 }
 
+// Rounded either side of `round`: float noise must not cost a whole step, nor
+// reach the value that gets sent.
+function gridPoint(base, step, value, round) {
+  var steps = Math.round((value - base) / step * 1e6) / 1e6
+  return Math.round((base + round(steps) * step) * 1e6) / 1e6
+}
+
+// A bound comes from the device and need not sit on the grid, so a snapped
+// value can land past it.
+function snapToStep(value, base, step, min, max, round) {
+  if (typeof value !== "number" || !isFinite(value)) return value
+  var clamped = clampNumber(value, min, max)
+  if (typeof step !== "number" || !isFinite(step) || step <= 0
+      || typeof base !== "number" || !isFinite(base)) {
+    return clamped
+  }
+  var snapped = gridPoint(base, step, clamped, round || Math.round)
+  if (snapped > max) snapped = gridPoint(base, step, max, Math.floor)
+  if (snapped < min) snapped = gridPoint(base, step, min, Math.ceil)
+  // Bounds narrower than a step hold no grid point; off the grid beats past a
+  // limit the device just reported.
+  if (snapped > max || snapped < min) return clamped
+  return snapped
+}
+
 function temperatureSettled(entity, attribute, value, step) {
   var slack = typeof step === "number" && isFinite(step) && step > 0
     ? step / 2 : 0.25

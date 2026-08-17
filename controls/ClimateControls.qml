@@ -98,6 +98,11 @@ Item {
     return Math.max(range.min, Math.min(range.max, value))
   }
 
+  function snap(value, round) {
+    return Model.snapToStep(value, range.min, control.step,
+                            range.min, range.max, round)
+  }
+
   function format(value) {
     return Model.formatTemp(value, control.unit)
   }
@@ -148,6 +153,9 @@ Item {
         minimum: control.range.min
         maximum: control.range.max
         step: control.step
+        // The thermostat's own target_temp_step, so a drag is quantized to
+        // what it can actually hold.
+        snap: true
 
         onMoved: function(value) { pendingTarget.hold(value) }
         onReleased: function(value) { control.commitTarget(value) }
@@ -164,7 +172,8 @@ Item {
           tooltipText: "Cooler"
           foreground: control.fg
           fontFamily: control.family
-          onClicked: control.commitTarget(control.target - control.step)
+          onClicked: control.commitTarget(
+            control.snap(control.target - control.step, Math.ceil))
         }
 
         PanelActionButton {
@@ -172,7 +181,8 @@ Item {
           tooltipText: "Warmer"
           foreground: control.fg
           fontFamily: control.family
-          onClicked: control.commitTarget(control.target + control.step)
+          onClicked: control.commitTarget(
+            control.snap(control.target + control.step, Math.floor))
         }
       }
     }
@@ -188,6 +198,8 @@ Item {
       minimum: control.range.min
       maximum: Math.min(control.range.max, control.high)
       step: control.step
+      snap: true
+      stepBase: control.range.min
 
       onMoved: function(value) { pendingLow.hold(value) }
       onReleased: function(value) { control.commitRange(true, value) }
@@ -204,6 +216,9 @@ Item {
       minimum: Math.max(control.range.min, control.low)
       maximum: control.range.max
       step: control.step
+      snap: true
+      // This minimum rides the low end, so the default base would move the grid.
+      stepBase: control.range.min
 
       onMoved: function(value) { pendingHigh.hold(value) }
       onReleased: function(value) { control.commitRange(false, value) }

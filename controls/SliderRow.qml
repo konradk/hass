@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import "../Model.js" as Model
 
 // Labelled slider in the shape the audio panel uses: a section header on the
 // left, the live value on the right, and the track on its own line below at
@@ -16,6 +17,11 @@ Column {
   property real minimum: 0
   property real maximum: 1
   property real step: 0.05
+  // Off by default: quantizing a drag is right only where the step is the
+  // device's own granularity. Where it is a UI nudge size it just makes the
+  // track coarse — a 5% volume step leaves twenty-one reachable positions.
+  property bool snap: false
+  property real stepBase: minimum
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
@@ -76,10 +82,17 @@ Column {
       cursorShape: Qt.PointingHandCursor
       preventStealing: true
 
+      // Step 0 is snapToStep's pass-through: an unsnapped slider is still clamped.
+      function settle(value) {
+        return Model.snapToStep(value, sliderRow.stepBase,
+                                sliderRow.snap ? sliderRow.step : 0,
+                                sliderRow.minimum, sliderRow.maximum)
+      }
+
       function valueAt(x) {
         var span = Math.max(0.0001, sliderRow.maximum - sliderRow.minimum)
         var fraction = width > 0 ? Math.max(0, Math.min(1, x / width)) : 0
-        return sliderRow.minimum + fraction * span
+        return settle(sliderRow.minimum + fraction * span)
       }
 
       function track(x) {
@@ -106,8 +119,7 @@ Column {
       }
       onWheel: function(wheel) {
         var delta = wheel.angleDelta.y > 0 ? sliderRow.step : -sliderRow.step
-        var next = Math.max(sliderRow.minimum,
-                            Math.min(sliderRow.maximum, sliderRow.value + delta))
+        var next = settle(sliderRow.value + delta)
         sliderRow.moved(next)
         sliderRow.released(next)
       }

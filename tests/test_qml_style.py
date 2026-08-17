@@ -97,6 +97,17 @@ for path in QML_FILES:
               "%s:%d BorderSurface sets padding but nothing reads content*Inset"
               % (rel(path), line))
 
+print("only a device-declared step quantizes a drag")
+for path in QML_FILES:
+    source = open(path, encoding="utf-8").read()
+    for line, block in blocks(source, "SliderRow"):
+        # `control.step` is the climate entity's own target_temp_step; every
+        # other slider steps by a UI nudge size.
+        device_step = re.search(r"step:\s*control\.step\b", block) is not None
+        check(("snap: true" in block) == device_step,
+              "%s:%d SliderRow snaps to a step the device never declared"
+              % (rel(path), line))
+
 print("PanelActionButton instances pass a font family")
 for path in QML_FILES:
     source = open(path, encoding="utf-8").read()

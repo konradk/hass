@@ -870,6 +870,67 @@ section("optimistic reconciliation", () => {
      Model.temperatureSettled(stat, "temperature", 21.2, 0), true);
 });
 
+section("step snapping", () => {
+  eq("a drag lands on the nearest step",
+     Model.snapToStep(21.2, 5, 0.5, 5, 35), 21);
+  eq("it rounds up past the halfway point",
+     Model.snapToStep(21.3, 5, 0.5, 5, 35), 21.5);
+  eq("an offset base moves the whole grid",
+     Model.snapToStep(21.2, 5.25, 0.5, 5, 35), 21.25);
+  eq("a value already on the grid is left alone",
+     Model.snapToStep(21.5, 5, 0.5, 5, 35), 21.5);
+  eq("the result stays inside the range",
+     Model.snapToStep(40, 5, 0.5, 5, 35), 35);
+  eq("and inside it at the bottom",
+     Model.snapToStep(-3, 5, 0.5, 5, 35), 5);
+  eq("a percentage snaps to whole numbers",
+     Model.snapToStep(63.7, 0, 1, 0, 100), 64);
+  eq("a coarse step still lands on the grid",
+     Model.snapToStep(4123, 2000, 50, 2000, 6500), 4100);
+
+  // Band sliders bound themselves by the thermostat's own low and high.
+  eq("an upper bound off the grid snaps down into the range",
+     Model.snapToStep(40, 5, 0.5, 5, 21.3), 21);
+  eq("a lower bound off the grid snaps up into the range",
+     Model.snapToStep(3, 5, 0.5, 5.2, 30), 5.5);
+  eq("a value already inside and on the grid is untouched",
+     Model.snapToStep(21, 5, 0.5, 5.2, 21.3), 21);
+
+  eq("a value just inside an off-grid maximum stays inside",
+     Model.snapToStep(20.28, 5, 0.5, 5, 20.3), 20);
+  eq("a value just inside an off-grid minimum stays inside",
+     Model.snapToStep(20.22, 5, 0.5, 20.2, 35), 20.5);
+
+  // Off the grid beats past a limit the thermostat just reported.
+  eq("a range with no grid point in it keeps the clamped value",
+     Model.snapToStep(20.3, 5, 0.5, 20.2, 20.4), 20.3);
+  eq("and still clamps into that range",
+     Model.snapToStep(30, 5, 0.5, 20.2, 20.4), 20.4);
+  eq("the arithmetic does not leak float noise",
+     String(Model.snapToStep(21.4, 5, 0.5, 5, 35)), "21.5");
+  eq("a missing step leaves the value alone",
+     Model.snapToStep(21.2, 5, 0, 5, 35), 21.2);
+  eq("a negative step leaves the value alone",
+     Model.snapToStep(21.2, 5, -0.5, 5, 35), 21.2);
+  eq("a non-finite base leaves the value alone",
+     Model.snapToStep(21.2, NaN, 0.5, 5, 35), 21.2);
+  eq("a non-numeric value passes straight through",
+     Model.snapToStep(undefined, 5, 0.5, 5, 35), undefined);
+
+  eq("a downward nudge lands on the step below",
+     Model.snapToStep(20.5, 5, 0.5, 5, 35, Math.ceil), 20.5);
+  eq("an upward nudge lands on the step above",
+     Model.snapToStep(21.5, 5, 0.5, 5, 35, Math.floor), 21.5);
+  eq("a downward nudge from an off-grid target still moves one step",
+     Model.snapToStep(20, 4.5, 1, 4.5, 35, Math.ceil), 20.5);
+  eq("an upward nudge from an off-grid target still moves one step",
+     Model.snapToStep(22, 4.5, 1, 4.5, 35, Math.floor), 21.5);
+  eq("a directional mode still respects an off-grid maximum",
+     Model.snapToStep(40, 5, 0.5, 5, 21.3, Math.floor), 21);
+  eq("a directional mode still respects an off-grid minimum",
+     Model.snapToStep(3, 5, 0.5, 5.2, 30, Math.ceil), 5.5);
+});
+
 console.log();
 if (failures) {
   console.log(`FAILED: ${failures} of ${checks} checks`);
