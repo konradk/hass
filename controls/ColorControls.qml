@@ -144,6 +144,7 @@ Column {
   }
 
   Flow {
+    visible: control.favorites.length > 0
     width: parent.width
     spacing: Style.spacing.md
 

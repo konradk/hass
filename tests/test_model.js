@@ -703,6 +703,11 @@ section("saved favourite colours", () => {
      Model.temperatureToRgb(2700));
   eq("a saved rgb becomes hue and saturation",
      [Math.round(saved[1].hue), Math.round(saved[1].saturation)], [9, 67]);
+  const xy = Model.favoriteColors(strip, [{ xy_color: [0.7, 0.3] }]);
+  eq("a saved xy_color produces a swatch", xy.length, 1);
+  eq("a saved xy_color becomes hue and saturation",
+     [Math.round(xy[0].hue), Math.round(xy[0].saturation)], [0, 100]);
+
   eq("a saved hs_color survives as itself",
      [Math.round(saved[2].hue), Math.round(saved[2].saturation)], [120, 100]);
 
@@ -729,19 +734,32 @@ section("saved favourite colours", () => {
   eq("malformed favourites are dropped", messy.length, 1);
   eq("the survivor is the valid one", messy[0].rgb, [0, 0, 255]);
 
-  eq("an empty saved list falls back to the defaults",
-     Model.favoriteColors(strip, []).length, 8);
+  eq("an emptied saved list draws no swatches",
+     Model.favoriteColors(strip, []).length, 0);
+  eq("an unset saved list falls back to the defaults",
+     Model.favoriteColors(strip, null).length, 8);
 
   // A temperature favourite copied onto a light with no white channel would
   // produce a call the light must reject.
   const colorOnly = entity("light.c", "on", { supported_color_modes: ["hs"] });
   eq("a temperature favourite is dropped on a colour-only light",
-     Model.favoriteColors(colorOnly, [{ color_temp_kelvin: 2700 }]).length, 8);
+     Model.favoriteColors(colorOnly, [{ color_temp_kelvin: 2700 }]).length, 0);
 
   const whiteOnly = entity("light.w", "on",
     { supported_color_modes: ["color_temp"] });
   eq("a colour favourite is dropped on a tunable white",
-     Model.favoriteColors(whiteOnly, [{ rgb_color: [255, 0, 0] }]).length, 4);
+     Model.favoriteColors(whiteOnly, [{ rgb_color: [255, 0, 0] }]).length, 0);
+  eq("an xy favourite is dropped on a tunable white",
+     Model.favoriteColors(whiteOnly, [{ xy_color: [0.7, 0.3] }]).length, 0);
+
+  // The list is the answer even when none of it survives validation: a light
+  // that stopped advertising color_temp keeps whatever the user chose, minus
+  // the entries it can no longer render. Reinstating eight defaults would
+  // hand back picks that were replaced.
+  eq("a saved list nothing survives still means no defaults",
+     Model.favoriteColors(whiteOnly, [
+       { rgb_color: [255, 0, 0] }, { hs_color: [120, 100] }, { nonsense: true }
+     ]).length, 0);
 
   // Clamping is the model's job, not the light's.
   const clamped = Model.favoriteColors(strip, [{ color_temp_kelvin: 99000 }]);

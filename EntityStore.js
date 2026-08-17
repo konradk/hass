@@ -97,7 +97,7 @@ function projectRegistries(areas, entities, devices) {
       ? options.light : null
     var saved = lightOptions && typeof lightOptions === "object"
       ? lightOptions.favorite_colors : null
-    if (Array.isArray(saved) && saved.length) {
+    if (Array.isArray(saved)) {
       favorites[entry.entity_id] = saved
     }
   }

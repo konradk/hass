@@ -460,6 +460,28 @@ function rgbwwToRgb(rgbww, minKelvin, maxKelvin) {
   ])
 }
 
+function xyToRgb(xy) {
+  var x = xy[0]
+  var y = xy[1]
+  if (!(y > 0)) return [0, 0, 0]
+  var bigX = x / y
+  var bigZ = (1 - x - y) / y
+  var linear = [
+    bigX * 3.2406 - 1.5372 - bigZ * 0.4986,
+    -bigX * 0.9689 + 1.8758 + bigZ * 0.0415,
+    bigX * 0.0557 - 0.2040 + bigZ * 1.0570
+  ]
+  var peak = Math.max(linear[0], linear[1], linear[2])
+  var out = []
+  for (var i = 0; i < 3; i++) {
+    var c = clampNumber(peak > 1 ? linear[i] / peak : linear[i], 0, 1)
+    out.push(255 * (c <= 0.0031308
+      ? 12.92 * c
+      : 1.055 * Math.pow(c, 1 / 2.4) - 0.055))
+  }
+  return out
+}
+
 // ------------------------------------------------------- favourite colours
 
 // Home Assistant keeps per-light favourites in the entity registry under
@@ -537,6 +559,9 @@ function parseFavoriteColor(entity, raw) {
   var rgb = numberArray(raw.rgb_color, 3)
   if (rgb) return colorFavorite(rgb)
 
+  var xy = numberArray(raw.xy_color, 2)
+  if (xy) return colorFavorite(xyToRgb(xy))
+
   var rgbw = numberArray(raw.rgbw_color, 4)
   if (rgbw) return colorFavorite(rgbwToRgb(rgbw))
 
@@ -577,15 +602,21 @@ function defaultFavoriteColors(entity) {
   return out
 }
 
+// A list in the registry is a choice, whatever it holds: emptied, or filled
+// with entries this light cannot render — temperatures kept from before it
+// stopped advertising color_temp — it still means "not the defaults". Only an
+// absent list is an unanswered question. Every entry is still validated, so a
+// saved favourite can never become an arbitrary service call.
 function favoriteColors(entity, saved) {
   if (!entity || domain(entity) !== "light") return []
+  if (!Array.isArray(saved)) return defaultFavoriteColors(entity)
   var out = []
-  var list = Array.isArray(saved) ? saved.slice(0, MAX_FAVORITE_COLORS) : []
+  var list = saved.slice(0, MAX_FAVORITE_COLORS)
   for (var i = 0; i < list.length; i++) {
     var parsed = parseFavoriteColor(entity, list[i])
     if (parsed) out.push(parsed)
   }
-  return out.length ? out : defaultFavoriteColors(entity)
+  return out
 }
 
 // ---------------------------------------------------------------- media

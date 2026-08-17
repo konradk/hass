@@ -70,8 +70,11 @@ const withFavorites = Store.projectRegistries([], [
 eq("saved favourites are carried through",
    withFavorites.favoriteColors["light.a"],
    [{ color_temp_kelvin: 2700 }, { rgb_color: [255, 0, 0] }]);
-eq("an empty saved list is not carried",
-   withFavorites.favoriteColors["light.b"], undefined);
+eq("a deliberately emptied list is carried as empty",
+   withFavorites.favoriteColors["light.b"], []);
+eq("and is distinguishable from a light that was never customised",
+   "light.b" in withFavorites.favoriteColors
+     && !("light.d" in withFavorites.favoriteColors), true);
 eq("an unrelated options namespace is ignored",
    withFavorites.favoriteColors["light.c"], undefined);
 eq("an entry with no options is ignored",
