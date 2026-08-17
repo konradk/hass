@@ -222,6 +222,14 @@ DEMO_PLAYLIST = [
     ("Night Routine", "Loft Radio"),
 ]
 
+# Fixed service contracts for demo-only climate attributes. Never derive a
+# service name or payload key from incoming Home Assistant data.
+DEMO_CLIMATE_ATTRIBUTE_MODE_SERVICES = {
+    ("climate", "set_fan_mode"): ("fan_mode", "fan_modes", "fan mode"),
+    ("climate", "set_preset_mode"): ("preset_mode", "preset_modes", "preset"),
+    ("climate", "set_swing_mode"): ("swing_mode", "swing_modes", "swing mode"),
+}
+
 
 def demo_initial_states():
     def entity(entity_id, state, attributes):
@@ -243,9 +251,12 @@ def demo_initial_states():
             "hvac_modes": ["off", "heat", "cool", "dry", "fan_only", "auto"],
             "current_temperature": 21.4, "temperature": 22.0,
             "fan_mode": "medium", "fan_modes": ["auto", "low", "medium", "high"],
+            "preset_mode": "none", "preset_modes": ["none", "eco", "away", "boost"],
+            "swing_mode": "off", "swing_modes": ["off", "vertical", "horizontal", "both"],
             "target_temp_step": 0.5, "min_temp": 16.0, "max_temp": 30.0,
-            # TARGET_TEMPERATURE | FAN_MODE | TURN_OFF | TURN_ON
-            "supported_features": 1 | 8 | 128 | 256}),
+            # TARGET_TEMPERATURE | FAN_MODE | PRESET_MODE | SWING_MODE |
+            # TURN_OFF | TURN_ON
+            "supported_features": 1 | 8 | 16 | 32 | 128 | 256}),
         entity("media_player.living_room_tv", "playing", {
             "friendly_name": "Living Room TV", "icon": "mdi:television",
             "device_class": "tv", "volume_level": 0.42,
@@ -440,18 +451,25 @@ class DemoTransport:
                 return
             self._set_state(entity_id, mode)
             self._set_attrs(entity_id, {"hvac_action": "off" if mode == "off" else "idle"})
-        elif pair == ("climate", "set_fan_mode"):
-            mode = data.get("fan_mode")
-            modes = self._states[entity_id]["attributes"].get("fan_modes") or []
-            if not isinstance(mode, str) or mode not in modes:
-                self._fail(msg_id, "Invalid demo climate fan mode.")
+        elif pair in DEMO_CLIMATE_ATTRIBUTE_MODE_SERVICES:
+            if not self._set_demo_climate_attribute_mode(msg_id, entity_id, pair, data):
                 return
-            self._set_attrs(entity_id, {"fan_mode": mode})
         else:
             self._fail(msg_id, "demo backend does not implement %s.%s" % pair)
             return
 
         self._ok(msg_id, None)
+    def _set_demo_climate_attribute_mode(self, msg_id, entity_id, pair, data):
+        payload_key, options_attribute, error_noun = (
+            DEMO_CLIMATE_ATTRIBUTE_MODE_SERVICES[pair])
+        mode = data.get(payload_key)
+        modes = self._states[entity_id]["attributes"].get(options_attribute) or []
+        if not isinstance(mode, str) or mode not in modes:
+            self._fail(msg_id, "Invalid demo climate %s." % error_noun)
+            return False
+        self._set_attrs(entity_id, {payload_key: mode})
+        return True
+
 
     def _advance_playlist(self, entity_id, step):
         self._playlist_index = (self._playlist_index + step) % len(DEMO_PLAYLIST)

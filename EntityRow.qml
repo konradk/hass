@@ -30,8 +30,19 @@ CursorSurface {
 
   signal expandToggled()
   signal cursorRequested()
+  signal expandedControlCursorRequested(int index)
 
   property bool expanded: false
+  property int expandedControlCursorIndex: -1
+  readonly property int expandedControlCount: row.domain === "climate"
+    && expansion.item !== null ? expansion.item.selectorCount : 0
+  readonly property bool expandedControlPopupOpen: row.domain === "climate"
+    && expansion.item !== null && expansion.item.popupOpen
+
+  function activateExpandedControl(index) {
+    if (row.domain !== "climate" || expansion.item === null) return false
+    return expansion.item.activateSelector(index)
+  }
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
@@ -260,6 +271,10 @@ CursorSurface {
     id: climateControls
     ClimateControls {
       hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
+      selectorCursorIndex: row.expandedControlCursorIndex
+      onSelectorCursorRequested: function(index) {
+        row.expandedControlCursorRequested(index)
+      }
     }
   }
 

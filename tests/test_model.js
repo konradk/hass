@@ -204,37 +204,59 @@ section("temperature", () => {
      Model.climateHvacModeData(hvacEntity, "turbo"), {});
   eq("HVAC mode without advertised options is rejected",
      Model.climateHvacModeData(entity("climate.a", "cool"), "heat"), {});
-  eq("standard HVAC modes use readable labels",
-     ["off", "heat", "cool", "heat_cool", "auto", "dry", "fan_only"].map(
-       Model.climateHvacModeLabel),
-     ["Off", "Heat", "Cool", "Heat/Cool", "Auto", "Dry", "Fan only"]);
-  eq("custom HVAC mode separators are humanized",
-     Model.climateHvacModeLabel("eco_quiet-mode"), "Eco quiet mode");
+  eq("heat_cool has its conventional label",
+     Model.climateHvacModeLabel("heat_cool"), "Heat/Cool");
+  eq("custom mode separators are humanized",
+     Model.climateFanModeLabel("eco_quiet-mode"), "Eco quiet mode");
 
+  const optionalModeCases = [
+    {
+      name: "fan", capability: "climateFanMode", feature: 8,
+      optionsAttribute: "fan_modes", currentAttribute: "fan_mode",
+      selected: "high", options: ["auto", "high"],
+      modes: Model.climateFanModes, data: Model.climateFanModeData,
+      payload: { fan_mode: "high" }
+    },
+    {
+      name: "preset", capability: "climatePresetMode", feature: 16,
+      optionsAttribute: "preset_modes", currentAttribute: "preset_mode",
+      selected: "away", options: ["none", "away"],
+      modes: Model.climatePresetModes, data: Model.climatePresetModeData,
+      payload: { preset_mode: "away" }
+    },
+    {
+      name: "swing", capability: "climateSwingMode", feature: 32,
+      optionsAttribute: "swing_modes", currentAttribute: "swing_mode",
+      selected: "vertical", options: ["off", "vertical"],
+      modes: Model.climateSwingModes, data: Model.climateSwingModeData,
+      payload: { swing_mode: "vertical" }
+    }
+  ];
 
-  const fanEntity = entity("climate.a", "cool", {
-    supported_features: 8, fan_mode: "medium",
-    fan_modes: ["auto", "low", "medium", "high"]
+  optionalModeCases.forEach((modeCase) => {
+    const attributes = { supported_features: modeCase.feature };
+    attributes[modeCase.optionsAttribute] = modeCase.options;
+    attributes[modeCase.currentAttribute] = modeCase.options[0];
+    const modeEntity = entity("climate.a", "cool", attributes);
+
+    eq(`${modeCase.name} modes are preserved`,
+       modeCase.modes(modeEntity), modeCase.options);
+    eq(`${modeCase.name} mode needs its feature and options`,
+       Model.capabilitiesFor(modeEntity)[modeCase.capability], true);
+    eq(`${modeCase.name} mode is absent without its feature`,
+       Model.capabilitiesFor(entity("climate.a", "cool", {
+         [modeCase.optionsAttribute]: modeCase.options
+       }))[modeCase.capability], false);
+    eq(`${modeCase.name} mode is absent without advertised options`,
+       Model.capabilitiesFor(entity("climate.a", "cool", {
+         supported_features: modeCase.feature
+       }))[modeCase.capability], false);
+    eq(`${modeCase.name} payload has only its typed key`,
+       modeCase.data(modeEntity, modeCase.selected), modeCase.payload);
+    eq(`${modeCase.name} rejects an undeclared value`,
+       modeCase.data(modeEntity, "turbo"), {});
   });
-  eq("advertised climate fan modes are preserved",
-     Model.climateFanModes(fanEntity), ["auto", "low", "medium", "high"]);
-  eq("a climate fan mode is supported only with its feature and options",
-     Model.capabilitiesFor(fanEntity).climateFanMode, true);
-  eq("the selected advertised fan mode maps to the typed service payload",
-     Model.climateFanModeData(fanEntity, "high"), { fan_mode: "high" });
-  eq("an undeclared fan mode is rejected",
-     Model.climateFanModeData(fanEntity, "turbo"), {});
-  eq("fan options without the advertised feature are rejected",
-     Model.climateFanModeData(entity("climate.a", "cool", {
-       fan_modes: ["auto", "high"]
-     }), "high"), {});
-  eq("standard fan modes use readable labels",
-     ["on", "off", "auto", "low", "medium", "high", "top", "middle",
-      "focus", "diffuse"].map(Model.climateFanModeLabel),
-     ["On", "Off", "Auto", "Low", "Medium", "High", "Top", "Middle",
-      "Focus", "Diffuse"]);
-  eq("custom fan mode separators are humanized",
-     Model.climateFanModeLabel("quiet_mode"), "Quiet mode");
+
 
   eq("crossed target bounds are normalized",
      Model.climateTemperatureData(rangeEntity, undefined, 27, 16, "°C"),

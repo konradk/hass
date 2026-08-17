@@ -59,10 +59,10 @@ class BridgeProc:
         with self._lock:
             return list(self.events)
 
-    def wait_for(self, predicate, budget=10.0):
+    def wait_for(self, predicate, budget=10.0, after=0):
         end = time.time() + budget
         while time.time() < end:
-            for event in self.snapshot():
+            for event in self.snapshot()[after:]:
                 if predicate(event):
                     return event
             time.sleep(0.05)
@@ -673,6 +673,24 @@ def test_demo_needs_no_server():
             and e["entity"]["attributes"].get("fan_mode") == "high")
         check("sets the advertised demo climate fan mode", fan_mode is not None, fan_mode)
 
+        bridge.send({"op": "call_service", "domain": "climate", "service": "set_preset_mode",
+                     "entity_id": climate_id, "data": {"preset_mode": "away"},
+                     "tag": "demo-climate-preset"})
+        preset_mode = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == climate_id
+            and e["entity"]["attributes"].get("preset_mode") == "away")
+        check("sets the advertised demo climate preset", preset_mode is not None, preset_mode)
+
+        bridge.send({"op": "call_service", "domain": "climate", "service": "set_swing_mode",
+                     "entity_id": climate_id, "data": {"swing_mode": "both"},
+                     "tag": "demo-climate-swing"})
+        swing_mode = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == climate_id
+            and e["entity"]["attributes"].get("swing_mode") == "both")
+        check("sets the advertised demo climate swing mode", swing_mode is not None, swing_mode)
+
 
         bridge.send({"op": "call_service", "domain": "cover", "service": "open_cover",
                      "entity_id": "cover.garage_door", "tag": "demo-1"})
@@ -688,9 +706,11 @@ def test_demo_needs_no_server():
         check("rejects an unknown demo service",
               rejected is not None and rejected.get("ok") is False, rejected)
 
+        drift_after = len(bridge.snapshot())
         drift = bridge.wait_for(
             lambda e: e["ev"] == "state_changed"
-            and e["entity"]["entity_id"].startswith("climate."), budget=12)
+            and e["entity"]["entity_id"].startswith("climate."),
+            budget=12, after=drift_after)
         check("emits unprompted events", drift is not None)
     finally:
         bridge.stop()

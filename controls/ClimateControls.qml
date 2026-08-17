@@ -1,11 +1,10 @@
 import QtQuick
-import QtQuick.Controls
 import qs.Ui
 import qs.Commons
 import "../Model.js" as Model
 
-// Target temperature for a climate entity. Two shapes: a single setpoint, or
-// a low/high band when the thermostat reports one.
+// Temperature and mode controls for a climate entity. Temperature can be a
+// single setpoint or a low/high band.
 Item {
   id: control
 
@@ -35,6 +34,37 @@ Item {
   readonly property string hvacMode: entity ? Model.climateHvacMode(entity) : ""
   readonly property var fanModes: entity ? Model.climateFanModes(entity) : []
   readonly property string fanMode: entity ? Model.climateFanMode(entity) : ""
+  readonly property var presetModes: entity ? Model.climatePresetModes(entity) : []
+  readonly property string presetMode: entity ? Model.climatePresetMode(entity) : ""
+  readonly property var swingModes: entity ? Model.climateSwingModes(entity) : []
+  readonly property string swingMode: entity ? Model.climateSwingMode(entity) : ""
+  readonly property bool popupOpen: fanModeDropdown.popupOpen
+    || hvacModeDropdown.popupOpen || presetModeDropdown.popupOpen
+    || swingModeDropdown.popupOpen
+  property int selectorCursorIndex: -1
+  readonly property var activeSelectors: {
+    var selectors = [
+      fanModeDropdown, hvacModeDropdown, presetModeDropdown, swingModeDropdown
+    ]
+    var active = []
+    for (var i = 0; i < selectors.length; i++) {
+      if (selectors[i].visible) active.push(selectors[i])
+    }
+    return active
+  }
+  readonly property int selectorCount: activeSelectors.length
+
+  signal selectorCursorRequested(int index)
+
+  function selectorIndex(selector) {
+    return control.activeSelectors.indexOf(selector)
+  }
+
+  function activateSelector(index) {
+    if (index < 0 || index >= control.activeSelectors.length) return false
+    control.activeSelectors[index].toggle()
+    return true
+  }
 
   function attr(key, fallback) {
     if (!entity || !entity.attributes) return fallback
@@ -162,39 +192,106 @@ Item {
       onReleased: function(value) { control.commitRange(false, value) }
     }
 
-    Dropdown {
+    Row {
       visible: control.capabilities.climateFanMode
+        || control.capabilities.climateHvacMode
       width: parent.width
-      label: "FAN"
-      value: control.fanMode
-      foreground: control.fg
-      fontFamily: control.family
-      options: control.fanModes.map(function(mode) {
-        return { value: mode, label: Model.climateFanModeLabel(mode) }
-      })
-      onChanged: function(mode) {
-        // A state update also changes value. It is already authoritative,
-        // so only dispatch a user selection that differs from that state.
-        if (mode !== control.fanMode) {
+      spacing: Style.spacing.md
+
+      readonly property bool bothSelectors: control.capabilities.climateFanMode
+        && control.capabilities.climateHvacMode
+
+      ClimateModeSelector {
+        id: fanModeDropdown
+        hasCursor: control.selectorCursorIndex
+          === control.selectorIndex(fanModeDropdown)
+        visible: control.capabilities.climateFanMode
+        width: parent.bothSelectors
+          ? (parent.width - parent.spacing) / 2 : parent.width
+        label: "FAN"
+        authoritativeValue: control.fanMode
+        modes: control.fanModes
+        modeLabel: function(mode) { return Model.climateFanModeLabel(mode) }
+        foreground: control.fg
+        fontFamily: control.family
+        onModeSelected: function(mode) {
           control.hass.setClimateFanMode(control.entityId, mode)
+        }
+        onSelectorHovered: {
+          control.selectorCursorRequested(control.selectorIndex(fanModeDropdown))
+        }
+      }
+
+      ClimateModeSelector {
+        id: hvacModeDropdown
+        hasCursor: control.selectorCursorIndex
+          === control.selectorIndex(hvacModeDropdown)
+        visible: control.capabilities.climateHvacMode
+        width: parent.bothSelectors
+          ? (parent.width - parent.spacing) / 2 : parent.width
+        label: "MODE"
+        authoritativeValue: control.hvacMode
+        modes: control.hvacModes
+        modeLabel: function(mode) { return Model.climateHvacModeLabel(mode) }
+        foreground: control.fg
+        fontFamily: control.family
+        onModeSelected: function(mode) {
+          control.hass.setClimateHvacMode(control.entityId, mode)
+        }
+        onSelectorHovered: {
+          control.selectorCursorRequested(control.selectorIndex(hvacModeDropdown))
         }
       }
     }
-    Dropdown {
-      visible: control.capabilities.climateHvacMode
+
+    Row {
+      visible: control.capabilities.climatePresetMode
+        || control.capabilities.climateSwingMode
       width: parent.width
-      label: "MODE"
-      value: control.hvacMode
-      foreground: control.fg
-      fontFamily: control.family
-      options: control.hvacModes.map(function(mode) {
-        return { value: mode, label: Model.climateHvacModeLabel(mode) }
-      })
-      onChanged: function(mode) {
-        // Incoming state is authoritative. Only a different user choice
-        // needs the typed service call.
-        if (mode !== control.hvacMode) {
-          control.hass.setClimateHvacMode(control.entityId, mode)
+      spacing: Style.spacing.md
+
+      readonly property bool bothSelectors: control.capabilities.climatePresetMode
+        && control.capabilities.climateSwingMode
+
+      ClimateModeSelector {
+        id: presetModeDropdown
+        hasCursor: control.selectorCursorIndex
+          === control.selectorIndex(presetModeDropdown)
+        visible: control.capabilities.climatePresetMode
+        width: parent.bothSelectors
+          ? (parent.width - parent.spacing) / 2 : parent.width
+        label: "PRESET"
+        authoritativeValue: control.presetMode
+        modes: control.presetModes
+        modeLabel: function(mode) { return Model.climatePresetModeLabel(mode) }
+        foreground: control.fg
+        fontFamily: control.family
+        onModeSelected: function(mode) {
+          control.hass.setClimatePresetMode(control.entityId, mode)
+        }
+        onSelectorHovered: {
+          control.selectorCursorRequested(control.selectorIndex(presetModeDropdown))
+        }
+      }
+
+      ClimateModeSelector {
+        id: swingModeDropdown
+        hasCursor: control.selectorCursorIndex
+          === control.selectorIndex(swingModeDropdown)
+        visible: control.capabilities.climateSwingMode
+        width: parent.bothSelectors
+          ? (parent.width - parent.spacing) / 2 : parent.width
+        label: "SWING"
+        authoritativeValue: control.swingMode
+        modes: control.swingModes
+        modeLabel: function(mode) { return Model.climateSwingModeLabel(mode) }
+        foreground: control.fg
+        fontFamily: control.family
+        onModeSelected: function(mode) {
+          control.hass.setClimateSwingMode(control.entityId, mode)
+        }
+        onSelectorHovered: {
+          control.selectorCursorRequested(control.selectorIndex(swingModeDropdown))
         }
       }
     }

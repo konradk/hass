@@ -25,6 +25,7 @@ Panel {
   // Dormant until a key is pressed.
   property int cursorIndex: 0
   property bool cursorActive: false
+  property int expandedControlCursorIndex: -1
 
   readonly property int rowCount: serviceReady ? hass.rows.count : 0
   readonly property bool hasDevices: serviceReady && hass.hasDevices
@@ -34,11 +35,53 @@ Panel {
     expandedEntityId = ""
     cursorActive = false
     cursorIndex = 0
+    expandedControlCursorIndex = -1
   }
 
   function moveCursor(delta) {
-    if (rowCount === 0) return
-    cursorIndex = Math.max(0, Math.min(rowCount - 1, cursorIndex + delta))
+    if (rowCount === 0 || delta === 0) return
+    var currentPosition = 0
+    var total = 0
+    for (var i = 0; i < rowCount; i++) {
+      var item = entityRepeater.itemAt(i)
+      var controls = item && item.expanded ? item.expandedControlCount : 0
+      if (i === cursorIndex) {
+        var controlOffset = root.expandedControlCursorIndex >= 0
+          && root.expandedControlCursorIndex < controls
+          ? root.expandedControlCursorIndex + 1 : 0
+        currentPosition = total + controlOffset
+      }
+      total += 1 + controls
+    }
+
+    var nextPosition = Math.max(0, Math.min(total - 1, currentPosition + delta))
+    if (nextPosition === currentPosition) return
+    for (var rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+      var row = entityRepeater.itemAt(rowIndex)
+      var rowControls = row && row.expanded ? row.expandedControlCount : 0
+      if (nextPosition === 0) {
+        cursorIndex = rowIndex
+        expandedControlCursorIndex = -1
+        return
+      }
+      if (nextPosition <= rowControls) {
+        cursorIndex = rowIndex
+        expandedControlCursorIndex = nextPosition - 1
+        return
+      }
+      nextPosition -= 1 + rowControls
+    }
+  }
+
+  function moveCursorH(delta) {
+    var item = currentRow()
+    if (!item || root.expandedControlCursorIndex < 0) {
+      root.switchTab(delta)
+      return
+    }
+    root.expandedControlCursorIndex = Math.max(
+      0, Math.min(item.expandedControlCount - 1,
+                  root.expandedControlCursorIndex + delta))
   }
 
   function switchTab(delta) {
@@ -50,6 +93,7 @@ Panel {
     var next = (current + delta + tabs.length) % tabs.length
     hass.setActiveTab(tabs[next].id)
     cursorIndex = 0
+    expandedControlCursorIndex = -1
     expandedEntityId = ""
   }
 
@@ -58,10 +102,25 @@ Panel {
     if (cursorIndex < 0 || cursorIndex >= items) return null
     return entityRepeater.itemAt(cursorIndex)
   }
+  readonly property bool expandedControlPopupOpen: {
+    if (!root.expandedEntityId) return false
+    for (var i = 0; i < entityRepeater.count; i++) {
+      var item = entityRepeater.itemAt(i)
+      if (item && item.entityId === root.expandedEntityId) {
+        return item.expandedControlPopupOpen
+      }
+    }
+    return false
+  }
 
   function activateCursor() {
     var item = currentRow()
-    if (item) item.activate()
+    if (!item) return
+    if (root.expandedControlCursorIndex >= 0) {
+      item.activateExpandedControl(root.expandedControlCursorIndex)
+    } else {
+      item.activate()
+    }
   }
 
   // A separate plugin surface, so it goes through the shell. The popup closes
@@ -76,6 +135,7 @@ Panel {
     var item = currentRow()
     if (!item || !item.expandable) return
     expandedEntityId = (expandedEntityId === item.entityId) ? "" : item.entityId
+    expandedControlCursorIndex = -1
   }
 
   // Colour carries the state, so the button never changes width.
@@ -211,13 +271,15 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // An open dropdown owns j/k, arrows, Enter, and Escape.
+      blocked: root.expandedControlPopupOpen
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) {
         // The first key press only wakes the cursor.
         if (!root.cursorActive) { root.cursorActive = true; return }
         if (dy !== 0) root.moveCursor(dy)
-        else if (dx !== 0) root.switchTab(dx)
+        else if (dx !== 0) root.moveCursorH(dx)
       }
       onActivateRequested: if (root.cursorActive) root.activateCursor()
       onTextKey: function(key) {
@@ -288,6 +350,7 @@ Panel {
             if (!root.serviceReady) return
             root.hass.setActiveTab(value)
             root.cursorIndex = 0
+            root.expandedControlCursorIndex = -1
             root.expandedEntityId = ""
           }
         }
@@ -438,15 +501,26 @@ Panel {
                 showIcon: root.serviceReady ? root.hass.showEntityIcons : true
                 reserveExpandSlot: root.serviceReady ? root.hass.rowsHaveExpandable : false
                 hasCursor: root.cursorActive && root.cursorIndex === index
+                  && root.expandedControlCursorIndex < 0
                 expanded: root.expandedEntityId === entityId
+                expandedControlCursorIndex: root.cursorIndex === index
+                  ? root.expandedControlCursorIndex : -1
                 onCursorRequested: {
                   root.cursorActive = true
                   root.cursorIndex = index
+                  root.expandedControlCursorIndex = -1
                 }
                 onExpandToggled: {
                   // One at a time: this is a popup, not a dashboard.
                   root.expandedEntityId = (root.expandedEntityId === entityId)
                     ? "" : entityId
+                  root.expandedControlCursorIndex = -1
+                }
+                onExpandedControlCursorRequested: function(controlIndex) {
+                  if (controlIndex < 0) return
+                  root.cursorActive = true
+                  root.cursorIndex = index
+                  root.expandedControlCursorIndex = controlIndex
                 }
               }
             }

@@ -18,9 +18,11 @@ Quickshell plugin for **Omarchy 4**. Pick the devices and toggle lights, adjust 
 
 ## Keyboard
 
-With the panel open: `j`/`k` or arrows move, `←`/`→` switch area tabs, `enter`
-turns the highlighted device on or off, `e` expands its controls, `s` opens
-settings, `r` refreshes, `esc` closes, `tab` moves to the next bar panel.
+With the panel open, `j`/`k` or `↑`/`↓` traverse device rows and their
+expanded controls. Inside expanded controls, `←`/`→` move between selectors;
+otherwise they switch area tabs. `enter` activates the selected row or opens
+the selected dropdown. `e` expands its controls, `s` opens settings, `r`
+refreshes, `esc` closes, and `tab` moves to the next bar panel.
 
 ## What you can control
 
@@ -32,7 +34,7 @@ settings, `r` refreshes, `esc` closes, `tab` moves to the next bar panel.
 | `scene`, `script` | Activate button |
 | `media_player` | Previous / play-pause / next, volume slider |
 | `cover` | Open / stop / close |
-| `climate` | On/off when advertised, plus HVAC-mode, fan-mode, and target-temperature or low/high-band selection when advertised |
+| `climate` | On/off when advertised, plus HVAC, fan, preset, swing, and target-temperature or low/high-band controls when advertised |
 | `sensor`, `binary_sensor`, everything else | State display only |
 
 Cameras not yet.

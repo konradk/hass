@@ -188,6 +188,8 @@ var COVER_STOP = 8
 var CLIMATE_TARGET_TEMPERATURE = 1
 var CLIMATE_TARGET_TEMPERATURE_RANGE = 2
 var CLIMATE_FAN_MODE = 8
+var CLIMATE_PRESET_MODE = 16
+var CLIMATE_SWING_MODE = 32
 var CLIMATE_TURN_OFF = 128
 var CLIMATE_TURN_ON = 256
 
@@ -229,6 +231,8 @@ function capabilitiesFor(entity) {
     climateRange: false,
     climateHvacMode: false,
     climateFanMode: false,
+    climatePresetMode: false,
+    climateSwingMode: false,
     expandable: false,
     reserveExpandSlot: false
   }
@@ -250,9 +254,13 @@ function capabilitiesFor(entity) {
       && typeof a.target_temp_high === "number"
     result.climateTarget = hasFeature(bits, CLIMATE_TARGET_TEMPERATURE)
       && typeof a.temperature === "number"
-    result.climateHvacMode = climateHvacModes(entity).length > 0
+    result.climateHvacMode = hasClimateModeOption(entity, "hvac_modes")
     result.climateFanMode = hasFeature(bits, CLIMATE_FAN_MODE)
-      && climateFanModes(entity).length > 0
+      && hasClimateModeOption(entity, "fan_modes")
+    result.climatePresetMode = hasFeature(bits, CLIMATE_PRESET_MODE)
+      && hasClimateModeOption(entity, "preset_modes")
+    result.climateSwingMode = hasFeature(bits, CLIMATE_SWING_MODE)
+      && hasClimateModeOption(entity, "swing_modes")
 
   }
   result.expandable = result.brightness
@@ -260,6 +268,7 @@ function capabilitiesFor(entity) {
     || result.mediaVolume || result.coverOpen || result.coverStop
     || result.coverClose || result.climateTarget || result.climateRange
     || result.climateHvacMode || result.climateFanMode
+    || result.climatePresetMode || result.climateSwingMode
   // Climate integrations commonly clear the live target while the device is
   // off. Keep the row geometry stable without pretending there is a target
   // value to edit: the chevron remains hidden/disabled until controls are
@@ -353,8 +362,8 @@ function climateTemperatureData(entity, target, low, high, unitFallback) {
 // HVAC mode is the climate entity state. Unlike optional climate controls,
 // Home Assistant does not assign it a supported-feature bit; the advertised
 // `hvac_modes` list is the capability contract for climate.set_hvac_mode.
-function climateHvacModes(entity) {
-  var declared = attrs(entity).hvac_modes
+function climateModeOptions(entity, optionsAttribute) {
+  var declared = attrs(entity)[optionsAttribute]
   if (!Array.isArray(declared)) return []
   var modes = []
   for (var i = 0; i < declared.length; i++) {
@@ -362,6 +371,46 @@ function climateHvacModes(entity) {
     if (modes.indexOf(declared[i]) === -1) modes.push(declared[i])
   }
   return modes
+}
+
+// Projection only needs the capability bit, not a new option list on every
+// state update. Scan the advertised values directly.
+function hasClimateModeOption(entity, optionsAttribute) {
+  var declared = attrs(entity)[optionsAttribute]
+  if (!Array.isArray(declared)) return false
+  for (var i = 0; i < declared.length; i++) {
+    if (typeof declared[i] === "string" && declared[i].trim()) return true
+  }
+  return false
+}
+
+function climateModeDeclared(entity, optionsAttribute, mode) {
+  var declared = attrs(entity)[optionsAttribute]
+  if (!Array.isArray(declared) || typeof mode !== "string") return false
+  for (var i = 0; i < declared.length; i++) {
+    if (declared[i] === mode && mode.trim()) return true
+  }
+  return false
+}
+
+function climateAttributeMode(entity, attributeName) {
+  var mode = attrs(entity)[attributeName]
+  return typeof mode === "string" ? mode : ""
+}
+
+function climateModeData(entity, mode, featureFlag, optionsAttribute, payloadKey) {
+  if (domain(entity) !== "climate" || isUnavailable(entity)
+      || (featureFlag && !hasFeature(featureBits(entity), featureFlag))
+      || !climateModeDeclared(entity, optionsAttribute, mode)) {
+    return {}
+  }
+  var data = {}
+  data[payloadKey] = mode
+  return data
+}
+
+function climateHvacModes(entity) {
+  return climateModeOptions(entity, "hvac_modes")
 }
 
 function climateHvacMode(entity) {
@@ -376,64 +425,63 @@ function humanizeMode(mode) {
 }
 
 function climateHvacModeLabel(mode) {
-  switch (mode) {
-  case "off": return "Off"
-  case "heat": return "Heat"
-  case "cool": return "Cool"
-  case "heat_cool": return "Heat/Cool"
-  case "auto": return "Auto"
-  case "dry": return "Dry"
-  case "fan_only": return "Fan only"
-  default: return humanizeMode(mode)
-  }
+  return mode === "heat_cool" ? "Heat/Cool" : humanizeMode(mode)
 }
 
-// These are Home Assistant's standard climate fan-mode values. Integrations
-// may advertise more, so unknown values use the protocol-token fallback.
 function climateFanModeLabel(mode) {
-  switch (mode) {
-  case "on": return "On"
-  case "off": return "Off"
-  case "auto": return "Auto"
-  case "low": return "Low"
-  case "medium": return "Medium"
-  case "high": return "High"
-  case "top": return "Top"
-  case "middle": return "Middle"
-  case "focus": return "Focus"
-  case "diffuse": return "Diffuse"
-  default: return humanizeMode(mode)
-  }
+  return humanizeMode(mode)
 }
 
 function climateHvacModeData(entity, mode) {
-  var caps = capabilitiesFor(entity)
-  if (!caps.climateHvacMode || typeof mode !== "string") return {}
-  return climateHvacModes(entity).indexOf(mode) === -1 ? {} : { hvac_mode: mode }
+  return climateModeData(entity, mode, 0, "hvac_modes", "hvac_mode")
 }
 
 // Climate integrations declare every permitted fan-mode token. Preserve tokens
 // exactly because Home Assistant expects the selected value verbatim.
 function climateFanModes(entity) {
-  var declared = attrs(entity).fan_modes
-  if (!Array.isArray(declared)) return []
-  var modes = []
-  for (var i = 0; i < declared.length; i++) {
-    if (typeof declared[i] !== "string" || !declared[i].trim()) continue
-    if (modes.indexOf(declared[i]) === -1) modes.push(declared[i])
-  }
-  return modes
+  return climateModeOptions(entity, "fan_modes")
 }
 
 function climateFanMode(entity) {
-  var mode = attrs(entity).fan_mode
-  return typeof mode === "string" ? mode : ""
+  return climateAttributeMode(entity, "fan_mode")
 }
 
 function climateFanModeData(entity, mode) {
-  var caps = capabilitiesFor(entity)
-  if (!caps.climateFanMode || typeof mode !== "string") return {}
-  return climateFanModes(entity).indexOf(mode) === -1 ? {} : { fan_mode: mode }
+  return climateModeData(entity, mode, CLIMATE_FAN_MODE, "fan_modes", "fan_mode")
+}
+
+function climatePresetModeLabel(mode) {
+  return humanizeMode(mode)
+}
+
+function climatePresetModes(entity) {
+  return climateModeOptions(entity, "preset_modes")
+}
+
+function climatePresetMode(entity) {
+  return climateAttributeMode(entity, "preset_mode")
+}
+
+function climatePresetModeData(entity, mode) {
+  return climateModeData(entity, mode, CLIMATE_PRESET_MODE,
+                         "preset_modes", "preset_mode")
+}
+
+function climateSwingModeLabel(mode) {
+  return humanizeMode(mode)
+}
+
+function climateSwingModes(entity) {
+  return climateModeOptions(entity, "swing_modes")
+}
+
+function climateSwingMode(entity) {
+  return climateAttributeMode(entity, "swing_mode")
+}
+
+function climateSwingModeData(entity, mode) {
+  return climateModeData(entity, mode, CLIMATE_SWING_MODE,
+                         "swing_modes", "swing_mode")
 }
 
 

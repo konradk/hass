@@ -639,6 +639,24 @@ QtObject {
                             root.callTag(entityId))
   }
 
+  function setClimatePresetMode(entityId, mode) {
+    var data = Model.climatePresetModeData(root.states[entityId], mode)
+    if (Object.keys(data).length === 0) {
+      return root.rejectAction("This climate entity does not report a controllable preset.")
+    }
+    return root.callService("climate", "set_preset_mode", entityId, data,
+                            root.callTag(entityId))
+  }
+
+  function setClimateSwingMode(entityId, mode) {
+    var data = Model.climateSwingModeData(root.states[entityId], mode)
+    if (Object.keys(data).length === 0) {
+      return root.rejectAction("This climate entity does not report a controllable swing mode.")
+    }
+    return root.callService("climate", "set_swing_mode", entityId, data,
+                            root.callTag(entityId))
+  }
+
 
   function refresh() {
     root.send({ op: "refresh" })
