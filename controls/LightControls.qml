@@ -33,6 +33,11 @@ Column {
     }
   }
 
+  Connections {
+    target: control.hass
+    function onCommandFailed(tag) { pendingBrightness.rollback(tag) }
+  }
+
   spacing: Style.spacing.lg
 
   SliderRow {
@@ -53,8 +58,9 @@ Column {
     onReleased: function(value) {
       // setBrightness sends whole percent; the value held on screen must match.
       var percent = Math.round(value)
-      pendingBrightness.commit(percent)
-      control.hass.setBrightness(control.entityId, percent)
+      var tag = control.hass.setBrightness(control.entityId, percent)
+      if (tag) pendingBrightness.commit(percent, tag)
+      else pendingBrightness.clear()
     }
     onCanceled: pendingBrightness.clear()
   }

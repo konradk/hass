@@ -116,6 +116,36 @@ def main():
     check("domain actions validate entity capabilities",
           service.count("root.capabilities(entityId)") >= 7
           and "Model.capabilitiesFor(entity)" in service)
+    call_tag = function_block("callTag")
+    check("every call gets its own tag rather than one per entity",
+          "root.callSequence++" in call_tag
+          and "Model.callTag(entityId, root.callSequence)" in call_tag
+          and "property int callSequence" in service)
+    check("tags carry nothing beyond an entity id and a counter",
+          'CALL_TAG_PREFIX + String(entityId) + ":" + String(sequence)'
+          in open(os.path.join(ROOT, "Model.js"), encoding="utf-8").read())
+    check("a refused command is reported back with its tag",
+          "signal commandFailed(string tag)" in service
+          and "root.commandFailed(tag)" in function_block("handleResult"))
+    check("optimistic setters hand their tag to the caller",
+          function_block("callTagged").count("return") == 1
+          and "? tag : \"\"" in function_block("callTagged")
+          and all("return root.callTagged(" in function_block(name)
+                  for name in ("setBrightness", "setLightColor",
+                               "setLightColorTemp", "setVolume",
+                               "setClimateTemperature")))
+    # The two that go round callTagged are the ones the pending toggle map owns.
+    check("every domain action leaves through the same tagged call",
+          all("return root.callTagged(" in function_block(name)
+              for name in ("mediaPlayPause", "mediaNext", "mediaPrevious",
+                           "coverAction", "activateScene"))
+          and service.count("root.callService(") == 3
+          and all("root.callService(" in function_block(name)
+                  for name in ("callTagged", "toggleEntity", "setLock")))
+    check("toggle rollback still runs through the pending toggle map",
+          '"toggle:" + entityId' in function_block("toggleEntity")
+          and "clearPendingToggle" in function_block("handleResult"))
+
     check("selected tab persistence is debounced",
           "selectedTabSaveDebounce.restart()" in service)
 

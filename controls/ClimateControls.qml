@@ -109,9 +109,10 @@ Item {
 
   function commitTarget(value) {
     var wanted = control.clamp(value)
-    pendingTarget.commit(wanted)
-    control.hass.setClimateTemperature(control.entityId, wanted,
-                                       undefined, undefined)
+    var tag = control.hass.setClimateTemperature(control.entityId, wanted,
+                                                 undefined, undefined)
+    if (tag) pendingTarget.commit(wanted, tag)
+    else pendingTarget.clear()
   }
 
   function commitRange(changedLow, value) {
@@ -122,13 +123,23 @@ Item {
     var high = changedLow ? control.high : control.clamp(value)
     var normalizedLow = Math.min(low, high)
     var normalizedHigh = Math.max(low, high)
+    var tag = control.hass.setClimateTemperature(control.entityId, undefined,
+                                                 normalizedLow, normalizedHigh)
     // Only the changed end is committed: re-arming the other one's deadline
     // would let an end the thermostat never accepted outlive every nudge to
     // this one.
-    if (changedLow) pendingLow.commit(normalizedLow)
-    else pendingHigh.commit(normalizedHigh)
-    control.hass.setClimateTemperature(control.entityId, undefined,
-                                       normalizedLow, normalizedHigh)
+    var pending = changedLow ? pendingLow : pendingHigh
+    if (tag) pending.commit(changedLow ? normalizedLow : normalizedHigh, tag)
+    else pending.clear()
+  }
+
+  Connections {
+    target: control.hass
+    function onCommandFailed(tag) {
+      pendingTarget.rollback(tag)
+      pendingLow.rollback(tag)
+      pendingHigh.rollback(tag)
+    }
   }
 
   Column {

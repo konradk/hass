@@ -888,6 +888,37 @@ section("optimistic reconciliation", () => {
      Model.temperatureSettled(stat, "temperature", 21.2, 0), true);
 });
 
+section("command tags", () => {
+  eq("two calls to the same entity get different tags",
+     Model.callTag("light.a", 1) === Model.callTag("light.a", 2), false);
+  eq("the same call reads back as the same tag",
+     Model.callTag("light.a", 7), Model.callTag("light.a", 7));
+  eq("a tag keeps the prefix the bridge needs to report a failure",
+     Model.callTag("light.a", 3).indexOf("call:"), 0);
+  eq("a tag carries nothing but an entity id and a counter",
+     /^call:[A-Za-z0-9_.]+:\d+$/.test(Model.callTag("light.a", 12)), true);
+
+  eq("a call tag is recognised", Model.isCallTag(Model.callTag("light.a", 1)),
+     true);
+  eq("a toggle tag is not a call tag", Model.isCallTag("toggle:light.a"), false);
+  eq("an empty tag is not a call tag", Model.isCallTag(""), false);
+  eq("a missing tag is not a call tag", Model.isCallTag(null), false);
+
+  const first = Model.callTag("light.a", 1);
+  const second = Model.callTag("light.a", 2);
+  eq("a failure matches the value its own call put on screen",
+     Model.callTagMatches(first, first), true);
+  eq("a failure of an older call does not match a newer value",
+     Model.callTagMatches(second, first), false);
+  eq("nor does a newer failure match an older value",
+     Model.callTagMatches(first, second), false);
+  eq("an unsent value matches nothing", Model.callTagMatches("", first), false);
+  eq("an untagged failure matches nothing",
+     Model.callTagMatches(first, ""), false);
+  eq("two untagged sides still do not match",
+     Model.callTagMatches("", ""), false);
+});
+
 section("step snapping", () => {
   eq("a drag lands on the nearest step",
      Model.snapToStep(21.2, 5, 0.5, 5, 35), 21);

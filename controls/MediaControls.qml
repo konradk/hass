@@ -36,6 +36,11 @@ Item {
     }
   }
 
+  Connections {
+    target: control.hass
+    function onCommandFailed(tag) { pendingVolume.rollback(tag) }
+  }
+
   Column {
     id: column
     width: parent.width
@@ -85,8 +90,9 @@ Item {
 
       onMoved: function(value) { pendingVolume.hold(value) }
       onReleased: function(value) {
-        pendingVolume.commit(value)
-        control.hass.setVolume(control.entityId, value)
+        var tag = control.hass.setVolume(control.entityId, value)
+        if (tag) pendingVolume.commit(value, tag)
+        else pendingVolume.clear()
       }
       onCanceled: pendingVolume.clear()
     }

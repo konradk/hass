@@ -92,14 +92,29 @@ Column {
   function applyFavorite(favorite) {
     if (favorite.kind === "colorTemp") {
       pendingColor.clear()
-      pendingKelvin.commit(favorite.kelvin)
-      control.hass.setLightColorTemp(control.entityId, favorite.kelvin)
+      var kelvinTag = control.hass.setLightColorTemp(control.entityId,
+                                                     favorite.kelvin)
+      if (kelvinTag) pendingKelvin.commit(favorite.kelvin, kelvinTag)
+      else pendingKelvin.clear()
       return
     }
     pendingKelvin.clear()
-    pendingColor.commit({ hue: favorite.hue, saturation: favorite.saturation })
-    control.hass.setLightColor(control.entityId,
-                               favorite.hue, favorite.saturation)
+    var colorTag = control.hass.setLightColor(control.entityId,
+                                              favorite.hue, favorite.saturation)
+    if (colorTag) {
+      pendingColor.commit({ hue: favorite.hue, saturation: favorite.saturation },
+                          colorTag)
+    } else {
+      pendingColor.clear()
+    }
+  }
+
+  Connections {
+    target: control.hass
+    function onCommandFailed(tag) {
+      pendingColor.rollback(tag)
+      pendingKelvin.rollback(tag)
+    }
   }
 
   visible: control.caps.color || control.caps.colorTemp
@@ -136,8 +151,9 @@ Column {
       }
       onReleased: function(hue, saturation) {
         pendingKelvin.clear()
-        pendingColor.commit({ hue: hue, saturation: saturation })
-        control.hass.setLightColor(control.entityId, hue, saturation)
+        var tag = control.hass.setLightColor(control.entityId, hue, saturation)
+        if (tag) pendingColor.commit({ hue: hue, saturation: saturation }, tag)
+        else pendingColor.clear()
       }
       onCanceled: pendingColor.clear()
     }
@@ -204,8 +220,9 @@ Column {
     onMoved: function(value) { pendingKelvin.hold(value) }
     onReleased: function(value) {
       pendingColor.clear()
-      pendingKelvin.commit(value)
-      control.hass.setLightColorTemp(control.entityId, value)
+      var tag = control.hass.setLightColorTemp(control.entityId, value)
+      if (tag) pendingKelvin.commit(value, tag)
+      else pendingKelvin.clear()
     }
     onCanceled: pendingKelvin.clear()
   }

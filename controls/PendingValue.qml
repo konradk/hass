@@ -1,4 +1,5 @@
 import QtQuick
+import "../Model.js" as Model
 
 // A value someone has chosen that Home Assistant has not confirmed yet. Held
 // so a control never falls back to the stale entity value between the command
@@ -15,14 +16,18 @@ QtObject {
   // Lets a control holding two of these tell which one was touched last.
   property real pickedAt: 0
 
+  property string tag: ""
+
   // Mid-gesture: nothing sent, so no deadline.
   function hold(next) {
     expiry.stop()
+    pending.tag = ""
     pending.pickedAt = Date.now()
     pending.value = next
   }
 
-  function commit(next) {
+  function commit(next, tag) {
+    pending.tag = String(tag || "")
     pending.pickedAt = Date.now()
     pending.value = next
     expiry.restart()
@@ -30,11 +35,16 @@ QtObject {
 
   function clear() {
     expiry.stop()
+    pending.tag = ""
     pending.value = null
+  }
+
+  function rollback(failedTag) {
+    if (Model.callTagMatches(pending.tag, failedTag)) pending.clear()
   }
 
   property Timer expiry: Timer {
     interval: pending.holdMs
-    onTriggered: pending.value = null
+    onTriggered: pending.clear()
   }
 }

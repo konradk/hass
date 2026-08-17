@@ -362,6 +362,25 @@ function temperatureSettled(entity, attribute, value, step) {
   return settledWithin(attrs(entity)[attribute], value, slack)
 }
 
+// ------------------------------------------------------------ command tags
+
+// Identifies the call, not the entity. Reaches IPC and the bridge's logs, so
+// it carries nothing but an entity id and a counter.
+var CALL_TAG_PREFIX = "call:"
+
+function callTag(entityId, sequence) {
+  return CALL_TAG_PREFIX + String(entityId) + ":" + String(sequence)
+}
+
+function isCallTag(tag) {
+  return String(tag || "").indexOf(CALL_TAG_PREFIX) === 0
+}
+
+function callTagMatches(pendingTag, failedTag) {
+  if (!pendingTag || !failedTag) return false
+  return String(pendingTag) === String(failedTag)
+}
+
 // ------------------------------------------------------- colour conversion
 
 // Ported from the frontend's temperature2rgb: a temperature swatch has to be

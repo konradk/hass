@@ -518,8 +518,19 @@ QtObject {
   // Every call is tagged. An untagged one has its failure dropped on the floor
   // by the bridge, which is how a rejected scene or a refused cover used to
   // look exactly like a button that does nothing.
+  property int callSequence: 0
+
   function callTag(entityId) {
-    return "call:" + entityId
+    root.callSequence++
+    return Model.callTag(entityId, root.callSequence)
+  }
+
+  signal commandFailed(string tag)
+
+  // Returns the tag to match a later failure against, or "" if nothing went out.
+  function callTagged(domain, service, entityId, data) {
+    var tag = root.callTag(entityId)
+    return root.callService(domain, service, entityId, data, tag) ? tag : ""
   }
 
   function setBrightness(entityId, percent) {
@@ -527,11 +538,10 @@ QtObject {
       return root.rejectAction("This light does not support brightness control.")
     }
     if (percent <= 0) {
-      root.callService("light", "turn_off", entityId, {}, root.callTag(entityId))
-      return
+      return root.callTagged("light", "turn_off", entityId, {})
     }
-    root.callService("light", "turn_on", entityId,
-                     { brightness_pct: Math.round(percent) }, root.callTag(entityId))
+    return root.callTagged("light", "turn_on", entityId,
+                           { brightness_pct: Math.round(percent) })
   }
 
   function setLightColor(entityId, hue, saturation) {
@@ -540,8 +550,7 @@ QtObject {
     }
     var data = Model.lightColorData(hue, saturation)
     if (!data) return root.rejectAction("Invalid colour value.")
-    return root.callService("light", "turn_on", entityId, data,
-                            root.callTag(entityId))
+    return root.callTagged("light", "turn_on", entityId, data)
   }
 
   function setLightColorTemp(entityId, kelvin) {
@@ -550,8 +559,7 @@ QtObject {
     }
     var data = Model.lightColorTempData(root.states[entityId], kelvin)
     if (!data) return root.rejectAction("Invalid colour temperature.")
-    return root.callService("light", "turn_on", entityId, data,
-                            root.callTag(entityId))
+    return root.callTagged("light", "turn_on", entityId, data)
   }
 
   function setVolume(entityId, level) {
@@ -559,32 +567,29 @@ QtObject {
       return root.rejectAction("This media player does not support volume control.")
     }
     var clamped = Math.max(0, Math.min(1, level))
-    root.callService("media_player", "volume_set", entityId,
-                     { volume_level: clamped }, root.callTag(entityId))
+    return root.callTagged("media_player", "volume_set", entityId,
+                           { volume_level: clamped })
   }
 
   function mediaPlayPause(entityId) {
     if (!root.capabilities(entityId).mediaPlayPause) {
       return root.rejectAction("This media player does not support play/pause.")
     }
-    root.callService("media_player", "media_play_pause", entityId, {},
-                     root.callTag(entityId))
+    return root.callTagged("media_player", "media_play_pause", entityId, {})
   }
 
   function mediaNext(entityId) {
     if (!root.capabilities(entityId).mediaNext) {
       return root.rejectAction("This media player does not support next track.")
     }
-    root.callService("media_player", "media_next_track", entityId, {},
-                     root.callTag(entityId))
+    return root.callTagged("media_player", "media_next_track", entityId, {})
   }
 
   function mediaPrevious(entityId) {
     if (!root.capabilities(entityId).mediaPrevious) {
       return root.rejectAction("This media player does not support previous track.")
     }
-    root.callService("media_player", "media_previous_track", entityId, {},
-                     root.callTag(entityId))
+    return root.callTagged("media_player", "media_previous_track", entityId, {})
   }
 
   function coverAction(entityId, service) {
@@ -594,7 +599,7 @@ QtObject {
       : service === "close_cover" ? caps.coverClose
       : false
     if (!supported) return root.rejectAction("This cover does not support that action.")
-    root.callService("cover", service, entityId, {}, root.callTag(entityId))
+    return root.callTagged("cover", service, entityId, {})
   }
 
   function setLock(entityId, locked) {
@@ -632,7 +637,9 @@ QtObject {
       return root.rejectAction("Only scenes and scripts can be activated.")
     }
     var domain = Model.domainOf(entityId)
-    return root.callService(domain, "turn_on", entityId, {}, root.callTag(entityId))
+    // A tag, not a bool: IPC and the row both read this for truth alone, and
+    // an unsent call still comes back falsy.
+    return root.callTagged(domain, "turn_on", entityId, {})
   }
 
   function setClimateHvacMode(entityId, mode) {
@@ -640,8 +647,7 @@ QtObject {
     if (Object.keys(data).length === 0) {
       return root.rejectAction("This climate entity does not report a controllable HVAC mode.")
     }
-    return root.callService("climate", "set_hvac_mode", entityId, data,
-                            root.callTag(entityId))
+    return root.callTagged("climate", "set_hvac_mode", entityId, data)
   }
 
   function setClimateTemperature(entityId, target, low, high) {
@@ -651,8 +657,7 @@ QtObject {
     if (Object.keys(data).length === 0) {
       return root.rejectAction("This climate entity does not report a controllable target.")
     }
-    root.callService("climate", "set_temperature", entityId, data,
-                     root.callTag(entityId))
+    return root.callTagged("climate", "set_temperature", entityId, data)
   }
 
   function setClimateFanMode(entityId, mode) {
@@ -660,8 +665,7 @@ QtObject {
     if (Object.keys(data).length === 0) {
       return root.rejectAction("This climate entity does not report a controllable fan mode.")
     }
-    return root.callService("climate", "set_fan_mode", entityId, data,
-                            root.callTag(entityId))
+    return root.callTagged("climate", "set_fan_mode", entityId, data)
   }
 
   function setClimatePresetMode(entityId, mode) {
@@ -669,8 +673,7 @@ QtObject {
     if (Object.keys(data).length === 0) {
       return root.rejectAction("This climate entity does not report a controllable preset.")
     }
-    return root.callService("climate", "set_preset_mode", entityId, data,
-                            root.callTag(entityId))
+    return root.callTagged("climate", "set_preset_mode", entityId, data)
   }
 
   function setClimateSwingMode(entityId, mode) {
@@ -678,8 +681,7 @@ QtObject {
     if (Object.keys(data).length === 0) {
       return root.rejectAction("This climate entity does not report a controllable swing mode.")
     }
-    return root.callService("climate", "set_swing_mode", entityId, data,
-                            root.callTag(entityId))
+    return root.callTagged("climate", "set_swing_mode", entityId, data)
   }
 
 
@@ -755,6 +757,8 @@ QtObject {
       var entityId = tag.slice("toggle:".length)
       root.clearPendingToggle(entityId)
       root.refreshRow(entityId)
+    } else if (Model.isCallTag(tag)) {
+      root.commandFailed(tag)
     }
     root.lastError = event.error || "Command failed."
     root.lastErrorKind = event.errorKind || "command"
