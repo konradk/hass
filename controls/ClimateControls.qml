@@ -162,89 +162,39 @@ Item {
       onReleased: function(value) { control.commitRange(false, value) }
     }
 
-    Column {
+    Dropdown {
       visible: control.capabilities.climateFanMode
       width: parent.width
-      spacing: Style.spacing.sm
-
-      Text {
-        textFormat: Text.PlainText
-        text: "FAN"
-        color: control.fg
-        font.family: control.family
-        font.pixelSize: Style.font.caption
-        font.weight: Font.Medium
-      }
-
-      // ButtonGroup is a non-wrapping row. Keep every integration-provided
-      // mode reachable instead of letting a long list escape the panel.
-      ScrollView {
-        width: parent.width
-        implicitHeight: fanModeGroup.implicitHeight
-        clip: true
-        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        ScrollBar.vertical.policy: ScrollBar.AlwaysOff
-
-        ButtonGroup {
-          id: fanModeGroup
-          focusable: false
-          foreground: control.fg
-          fontFamily: control.family
-          fontSize: Style.font.caption
-          options: control.fanModes.map(function(mode) {
-            return { value: mode, label: Model.capitalize(mode) }
-          })
-          value: control.fanMode
-          onChanged: function(mode) {
-            // A state update also changes value. It is already authoritative,
-            // so only dispatch a user selection that differs from that state.
-            if (mode !== control.fanMode) {
-              control.hass.setClimateFanMode(control.entityId, mode)
-            }
-          }
+      label: "FAN"
+      value: control.fanMode
+      foreground: control.fg
+      fontFamily: control.family
+      options: control.fanModes.map(function(mode) {
+        return { value: mode, label: Model.climateFanModeLabel(mode) }
+      })
+      onChanged: function(mode) {
+        // A state update also changes value. It is already authoritative,
+        // so only dispatch a user selection that differs from that state.
+        if (mode !== control.fanMode) {
+          control.hass.setClimateFanMode(control.entityId, mode)
         }
       }
     }
-    Column {
+    Dropdown {
       visible: control.capabilities.climateHvacMode
       width: parent.width
-      spacing: Style.spacing.sm
-
-      Text {
-        textFormat: Text.PlainText
-        text: "MODE"
-        color: control.fg
-        font.family: control.family
-        font.pixelSize: Style.font.caption
-        font.weight: Font.Medium
-      }
-
-      // HVAC modes are integration-defined. Keep the selector horizontal so
-      // every advertised mode remains reachable in a narrow panel.
-      ScrollView {
-        width: parent.width
-        implicitHeight: hvacModeGroup.implicitHeight
-        clip: true
-        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        ScrollBar.vertical.policy: ScrollBar.AlwaysOff
-
-        ButtonGroup {
-          id: hvacModeGroup
-          focusable: false
-          foreground: control.fg
-          fontFamily: control.family
-          fontSize: Style.font.caption
-          options: control.hvacModes.map(function(mode) {
-            return { value: mode, label: Model.capitalize(mode) }
-          })
-          value: control.hvacMode
-          onChanged: function(mode) {
-            // Incoming state is authoritative. Only a different user choice
-            // needs the typed service call.
-            if (mode !== control.hvacMode) {
-              control.hass.setClimateHvacMode(control.entityId, mode)
-            }
-          }
+      label: "MODE"
+      value: control.hvacMode
+      foreground: control.fg
+      fontFamily: control.family
+      options: control.hvacModes.map(function(mode) {
+        return { value: mode, label: Model.climateHvacModeLabel(mode) }
+      })
+      onChanged: function(mode) {
+        // Incoming state is authoritative. Only a different user choice
+        // needs the typed service call.
+        if (mode !== control.hvacMode) {
+          control.hass.setClimateHvacMode(control.entityId, mode)
         }
       }
     }

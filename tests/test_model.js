@@ -204,6 +204,13 @@ section("temperature", () => {
      Model.climateHvacModeData(hvacEntity, "turbo"), {});
   eq("HVAC mode without advertised options is rejected",
      Model.climateHvacModeData(entity("climate.a", "cool"), "heat"), {});
+  eq("standard HVAC modes use readable labels",
+     ["off", "heat", "cool", "heat_cool", "auto", "dry", "fan_only"].map(
+       Model.climateHvacModeLabel),
+     ["Off", "Heat", "Cool", "Heat/Cool", "Auto", "Dry", "Fan only"]);
+  eq("custom HVAC mode separators are humanized",
+     Model.climateHvacModeLabel("eco_quiet-mode"), "Eco quiet mode");
+
 
   const fanEntity = entity("climate.a", "cool", {
     supported_features: 8, fan_mode: "medium",
@@ -221,6 +228,13 @@ section("temperature", () => {
      Model.climateFanModeData(entity("climate.a", "cool", {
        fan_modes: ["auto", "high"]
      }), "high"), {});
+  eq("standard fan modes use readable labels",
+     ["on", "off", "auto", "low", "medium", "high", "top", "middle",
+      "focus", "diffuse"].map(Model.climateFanModeLabel),
+     ["On", "Off", "Auto", "Low", "Medium", "High", "Top", "Middle",
+      "Focus", "Diffuse"]);
+  eq("custom fan mode separators are humanized",
+     Model.climateFanModeLabel("quiet_mode"), "Quiet mode");
 
   eq("crossed target bounds are normalized",
      Model.climateTemperatureData(rangeEntity, undefined, 27, 16, "°C"),

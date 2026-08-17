@@ -368,6 +368,44 @@ function climateHvacMode(entity) {
   return stateOf(entity)
 }
 
+// Home Assistant mode tokens are protocol values, not ready-made UI copy.
+// Preserve the token for service calls, but never render separators verbatim.
+function humanizeMode(mode) {
+  var text = cleaned(mode).replace(/[_-]+/g, " ")
+  return capitalize(text)
+}
+
+function climateHvacModeLabel(mode) {
+  switch (mode) {
+  case "off": return "Off"
+  case "heat": return "Heat"
+  case "cool": return "Cool"
+  case "heat_cool": return "Heat/Cool"
+  case "auto": return "Auto"
+  case "dry": return "Dry"
+  case "fan_only": return "Fan only"
+  default: return humanizeMode(mode)
+  }
+}
+
+// These are Home Assistant's standard climate fan-mode values. Integrations
+// may advertise more, so unknown values use the protocol-token fallback.
+function climateFanModeLabel(mode) {
+  switch (mode) {
+  case "on": return "On"
+  case "off": return "Off"
+  case "auto": return "Auto"
+  case "low": return "Low"
+  case "medium": return "Medium"
+  case "high": return "High"
+  case "top": return "Top"
+  case "middle": return "Middle"
+  case "focus": return "Focus"
+  case "diffuse": return "Diffuse"
+  default: return humanizeMode(mode)
+  }
+}
+
 function climateHvacModeData(entity, mode) {
   var caps = capabilitiesFor(entity)
   if (!caps.climateHvacMode || typeof mode !== "string") return {}
