@@ -263,15 +263,6 @@ Item {
         onClicked: function(mouse) { mouse.accepted = true }
       }
 
-      PanelToolTip {
-        visible: plotMouse.containsMouse && control.hoverPoint !== null
-        text: control.hoverPoint
-          ? control.formatClock(control.hoverPoint.t)
-            + " · " + control.formatValue(control.hoverPoint.v)
-          : ""
-        fontFamily: control.family
-      }
-
       Text {
         textFormat: Text.PlainText
         anchors.left: parent.left
