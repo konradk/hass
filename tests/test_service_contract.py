@@ -145,6 +145,10 @@ def main():
     check("toggle rollback still runs through the pending toggle map",
           '"toggle:" + entityId' in function_block("toggleEntity")
           and "clearPendingToggle" in function_block("handleResult"))
+    check("history is a tagged bridge op, not a Home Assistant service call",
+          'op: "history"' in function_block("requestHistory")
+          and "root.callService(" not in function_block("requestHistory")
+          and "historyGraph" in function_block("requestHistory"))
 
     check("selected tab persistence is debounced",
           "selectedTabSaveDebounce.restart()" in service)

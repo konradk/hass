@@ -34,13 +34,15 @@ CursorSurface {
 
   property bool expanded: false
   property int expandedControlCursorIndex: -1
-  readonly property int expandedControlCount: row.domain === "climate"
+  readonly property int expandedControlCount: (row.domain === "climate"
+    || row.domain === "sensor")
     && expansion.item !== null ? expansion.item.selectorCount : 0
   readonly property bool expandedControlPopupOpen: row.domain === "climate"
     && expansion.item !== null && expansion.item.popupOpen
 
   function activateExpandedControl(index) {
-    if (row.domain !== "climate" || expansion.item === null) return false
+    if ((row.domain !== "climate" && row.domain !== "sensor")
+        || expansion.item === null) return false
     return expansion.item.activateSelector(index)
   }
 
@@ -59,7 +61,10 @@ CursorSurface {
 
   readonly property string actionTooltip: {
     if (!actionable) return ""
-    if (expandable) return row.expanded ? "Collapse" : "Show controls"
+    if (expandable) {
+      if (row.domain === "sensor") return row.expanded ? "Collapse" : "Show graph"
+      return row.expanded ? "Collapse" : "Show controls"
+    }
     switch (control) {
     case "toggle": return isOn ? "Turn off" : "Turn on"
     case "lock": return isOn ? "Unlock" : "Lock"
@@ -218,7 +223,9 @@ CursorSurface {
           enabled: row.expandable
           opacity: row.expandable ? 1.0 : 0.0
           iconText: row.expanded ? "󰅃" : "󰅀"   // md-chevron_up / md-chevron_down
-          tooltipText: row.expanded ? "Collapse" : "Show controls"
+          tooltipText: row.expanded
+            ? "Collapse"
+            : (row.domain === "sensor" ? "Show graph" : "Show controls")
           foreground: row.dim
           fontFamily: row.family
           onClicked: row.expandToggled()
@@ -247,6 +254,7 @@ CursorSurface {
         case "media_player": return mediaControls
         case "climate": return climateControls
         case "cover": return coverControls
+        case "sensor": return sensorControls
         default: return null
         }
       }
@@ -282,6 +290,17 @@ CursorSurface {
     id: coverControls
     CoverControls {
       hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
+    }
+  }
+
+  Component {
+    id: sensorControls
+    SensorControls {
+      hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
+      selectorCursorIndex: row.expandedControlCursorIndex
+      onSelectorCursorRequested: function(index) {
+        row.expandedControlCursorRequested(index)
+      }
     }
   }
 }

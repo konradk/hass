@@ -55,6 +55,52 @@ function isExpandable(entity) {
   return capabilitiesFor(entity).expandable
 }
 
+function parseNumericState(value) {
+  if (typeof value === "number") return isFinite(value) ? value : null
+  if (typeof value !== "string") return null
+  var trimmed = value.trim()
+  if (!trimmed) return null
+  var parsed = Number(trimmed)
+  return isFinite(parsed) ? parsed : null
+}
+
+function hasHistoryGraph(entity) {
+  return domain(entity) === "sensor" && parseNumericState(stateOf(entity)) !== null
+}
+
+var HISTORY_HOURS = [1, 3, 6, 12, 24]
+
+function normalizeHistoryHours(hours) {
+  if (typeof hours === "string" && hours.trim() !== "") hours = Number(hours)
+  if (typeof hours !== "number" || !isFinite(hours)) return 0
+  for (var i = 0; i < HISTORY_HOURS.length; i++) {
+    if (hours === HISTORY_HOURS[i]) return hours
+  }
+  return 0
+}
+
+function historyWindowLabel(hours) {
+  var windowHours = normalizeHistoryHours(hours)
+  if (windowHours === 24) return "1d"
+  return windowHours ? String(windowHours) + "h" : ""
+}
+
+function nearestHistoryIndex(points, x, left, spanX, minT, maxT) {
+  if (!points || !points.length || !(spanX > 0)) return -1
+  if (!(maxT > minT)) return points.length - 1
+  var t = minT + ((x - left) / spanX) * (maxT - minT)
+  var best = 0
+  var bestDist = Math.abs(points[0].t - t)
+  for (var i = 1; i < points.length; i++) {
+    var dist = Math.abs(points[i].t - t)
+    if (dist < bestDist) {
+      best = i
+      bestDist = dist
+    }
+  }
+  return best
+}
+
 function isOn(entity) {
   var state = stateOf(entity)
   // A climate entity's state is its HVAC mode, so every real mode except
@@ -708,6 +754,7 @@ function capabilitiesFor(entity) {
     climateFanMode: false,
     climatePresetMode: false,
     climateSwingMode: false,
+    historyGraph: false,
     expandable: false,
     reserveExpandSlot: false
   }
@@ -738,12 +785,14 @@ function capabilitiesFor(entity) {
       && hasClimateModeOption(entity, "swing_modes")
 
   }
+  result.historyGraph = available && hasHistoryGraph(entity)
   result.expandable = result.brightness || result.color || result.colorTemp
     || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
     || result.mediaVolume || result.coverOpen || result.coverStop
     || result.coverClose || result.climateTarget || result.climateRange
     || result.climateHvacMode || result.climateFanMode
     || result.climatePresetMode || result.climateSwingMode
+    || result.historyGraph
   // Climate integrations commonly clear the live target while the device is
   // off. Keep the row geometry stable without pretending there is a target
   // value to edit: the chevron remains hidden/disabled until controls are

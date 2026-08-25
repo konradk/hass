@@ -130,6 +130,63 @@ def test_live_happy_path():
               call.get("target", {}).get("entity_id") == "light.test", call)
         check("passes service data",
               call.get("service_data", {}).get("brightness_pct") == 40, call)
+
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-1"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-1")
+        check("returns history for a sensor",
+              history is not None and history.get("hours") == 1
+              and history.get("entity_id") == "sensor.kitchen_temperature",
+              history)
+        check("history events carry a generation",
+              history is not None and isinstance(history.get("generation"), int),
+              history)
+        points = history.get("points") if history else None
+        check("history points are numeric samples",
+              isinstance(points, list) and len(points) >= 1
+              and all(isinstance(p.get("t"), (int, float))
+                      and isinstance(p.get("v"), (int, float))
+                      and set(p) == {"t", "v"} for p in points),
+              points)
+        dumped = json.dumps(history) if history else ""
+        check("history output has no Home Assistant attributes",
+              "access_token" not in dumped and "friendly_name" not in dumped
+              and '"a"' not in dumped, dumped)
+        request = server.history_requests[0] if server.history_requests else {}
+        check("asks Home Assistant for a bounded period",
+              request.get("type") == "history/history_during_period"
+              and request.get("no_attributes") is True
+              and request.get("minimal_response") is True
+              and request.get("entity_ids") == ["sensor.kitchen_temperature"],
+              request)
+
+        before_bad = len(bridge.snapshot())
+        bridge.send({"op": "history", "entity_id": "light.test", "hours": 1,
+                     "tag": "hist-bad-id"})
+        bad_id = bridge.wait_for(
+            lambda e: e["ev"] == "result" and e.get("tag") == "hist-bad-id",
+            after=before_bad)
+        check("rejects a non-sensor history id",
+              bad_id is not None and bad_id.get("ok") is False, bad_id)
+
+        before_hours = len(bridge.snapshot())
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 2, "tag": "hist-bad-hours"})
+        bad_hours = bridge.wait_for(
+            lambda e: e["ev"] == "result" and e.get("tag") == "hist-bad-hours",
+            after=before_hours)
+        check("rejects an unsupported history window",
+              bad_hours is not None and bad_hours.get("ok") is False, bad_hours)
+
+        before_day = len(bridge.snapshot())
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 24, "tag": "hist-1d"})
+        day = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-1d",
+            after=before_day)
+        check("accepts a 1d history window",
+              day is not None and day.get("hours") == 24, day)
     finally:
         bridge.stop()
         server.stop()
@@ -868,8 +925,45 @@ def test_demo_needs_no_server():
             and e["entity"]["entity_id"].startswith("climate."),
             budget=12, after=drift_after)
         check("emits unprompted events", drift is not None)
+
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "demo-history"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "demo-history")
+        check("demo history returns numeric points",
+              history is not None and isinstance(history.get("points"), list)
+              and len(history["points"]) > 1
+              and all("t" in point and "v" in point for point in history["points"]),
+              history)
+        check("demo history never includes attributes",
+              history is not None and "a" not in json.dumps(history.get("points")),
+              history)
     finally:
         bridge.stop()
+
+
+def test_history_is_downsampled():
+    print("history: oversized recorder payloads are downsampled")
+    server = FakeHA()
+    server.history_point_count = 800
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 6, "tag": "hist-dense"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-dense")
+        points = history.get("points") if history else []
+        check("caps history at 240 points",
+              2 <= len(points) <= 240, len(points) if history else None)
+        check("keeps chronological numeric samples",
+              points == sorted(points, key=lambda p: p["t"])
+              and all(set(p) == {"t", "v"} for p in points),
+              points[:3] if points else points)
+    finally:
+        bridge.stop()
+        server.stop()
 
 
 def main():
@@ -905,7 +999,8 @@ def main():
                  test_local_url_is_skipped_off_the_trusted_network,
                  test_local_url_without_a_trusted_network_is_never_used,
                  test_unknown_wifi_state_fails_closed,
-                 test_demo_needs_no_server):
+                 test_demo_needs_no_server,
+                 test_history_is_downsampled):
         test()
         print()
 

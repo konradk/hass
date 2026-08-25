@@ -77,6 +77,12 @@ QtObject {
   // unit of their own, so without this every temperature renders bare.
   property string temperatureUnit: ""
 
+  // Last requested recorder window per sensor. historyRevision invalidates
+  // bindings that walk the nested points array.
+  property var historyByEntity: ({})
+  property var pendingHistoryTags: ({})
+  property int historyRevision: 0
+
   // ------------------------------------------------------------ config
 
   property FileView configFile: FileView {
@@ -344,6 +350,7 @@ QtObject {
     root.temperatureUnit = ""
     root.pendingToggles = ({})
     pendingSweep.running = false
+    root.clearHistory()
     root.rebuildRows()
   }
 
@@ -465,6 +472,121 @@ QtObject {
       data: data || {},
       tag: tag || ""
     })
+  }
+
+  function historyFor(entityId) {
+    root.historyRevision
+    return root.historyByEntity[entityId] || null
+  }
+
+  function clearHistory(entityId) {
+    if (entityId) {
+      if (root.historyByEntity[entityId] === undefined
+          && root.pendingHistoryTags[entityId] === undefined) return
+      delete root.historyByEntity[entityId]
+      delete root.pendingHistoryTags[entityId]
+    } else {
+      root.historyByEntity = ({})
+      root.pendingHistoryTags = ({})
+    }
+    root.historyRevision++
+  }
+
+  function sanitizeHistoryPoints(raw) {
+    if (!raw || !raw.length) return []
+    var out = []
+    for (var i = 0; i < raw.length; i++) {
+      var point = raw[i]
+      if (!point) continue
+      if (typeof point.t !== "number" || !isFinite(point.t)) continue
+      if (typeof point.v !== "number" || !isFinite(point.v)) continue
+      out.push({ t: point.t, v: point.v })
+    }
+    return out
+  }
+
+  function requestHistory(entityId, hours) {
+    var windowHours = Model.normalizeHistoryHours(hours)
+    if (!windowHours) return root.rejectAction("Invalid history window.")
+    if (!root.capabilities(entityId).historyGraph) {
+      return root.rejectAction("This sensor does not have a history graph.")
+    }
+    var tag = root.callTag(entityId)
+    root.pendingHistoryTags[entityId] = tag
+    var current = root.historyByEntity[entityId] || {}
+    var keepPoints = current.hours === windowHours ? (current.points || []) : []
+    root.historyByEntity[entityId] = {
+      entityId: entityId,
+      hours: windowHours,
+      points: keepPoints,
+      loading: true,
+      error: ""
+    }
+    root.historyRevision++
+    var sent = root.send({
+      op: "history",
+      entity_id: entityId,
+      hours: windowHours,
+      tag: tag
+    })
+    if (!sent) {
+      delete root.pendingHistoryTags[entityId]
+      root.historyByEntity[entityId] = {
+        entityId: entityId,
+        hours: windowHours,
+        points: [],
+        loading: false,
+        error: "Not connected to Home Assistant."
+      }
+      root.historyRevision++
+      return false
+    }
+    return true
+  }
+
+  function handleHistory(event) {
+    var entityId = String(event.entity_id || "")
+    if (!entityId) return
+    var tag = String(event.tag || "")
+    var pendingTag = root.pendingHistoryTags[entityId] || ""
+    if (pendingTag && tag && tag !== pendingTag) return
+    delete root.pendingHistoryTags[entityId]
+    var hours = Model.normalizeHistoryHours(event.hours)
+    var current = root.historyByEntity[entityId]
+    if (current && hours && current.hours && hours !== current.hours) return
+    root.historyByEntity[entityId] = {
+      entityId: entityId,
+      hours: hours || (current && current.hours) || 1,
+      points: root.sanitizeHistoryPoints(event.points),
+      loading: false,
+      error: ""
+    }
+    root.historyRevision++
+  }
+
+  function appendHistoryPoint(entity) {
+    if (!entity || !entity.entity_id) return
+    var entry = root.historyByEntity[entity.entity_id]
+    if (!entry || entry.loading) return
+    var value = Model.parseNumericState(entity.state)
+    if (value === null) return
+    var hours = entry.hours || 1
+    var now = Date.now() / 1000
+    var start = now - hours * 3600
+    var points = []
+    var existing = entry.points || []
+    for (var i = 0; i < existing.length; i++) {
+      if (existing[i].t >= start) points.push(existing[i])
+    }
+    points.push({ t: now, v: value })
+    root.historyByEntity[entity.entity_id] = {
+      entityId: entity.entity_id,
+      hours: hours,
+      points: points,
+      loading: false,
+      error: entry.error || ""
+    }
+    root.historyRevision++
   }
 
   // ------------------------------------------------------------ actions
@@ -782,6 +904,9 @@ QtObject {
     case "result":
       root.handleResult(event)
       break
+    case "history":
+      root.handleHistory(event)
+      break
     case "log":
       if (event.level === "warn") console.warn("hass-bridge: " + event.msg)
       break
@@ -789,9 +914,31 @@ QtObject {
   }
 
   function handleResult(event) {
+    var tag = String(event.tag || "")
+    var historyEntityId = ""
+    for (var entityId in root.pendingHistoryTags) {
+      if (root.pendingHistoryTags[entityId] === tag) {
+        historyEntityId = entityId
+        break
+      }
+    }
+    if (historyEntityId) {
+      delete root.pendingHistoryTags[historyEntityId]
+      if (event.ok !== true) {
+        var current = root.historyByEntity[historyEntityId] || {}
+        root.historyByEntity[historyEntityId] = {
+          entityId: historyEntityId,
+          hours: current.hours || 1,
+          points: current.points || [],
+          loading: false,
+          error: event.error || "History request failed."
+        }
+        root.historyRevision++
+      }
+    }
+
     if (event.ok === true) return
 
-    var tag = String(event.tag || "")
     if (tag.indexOf("toggle:") === 0) {
       // Drop the guess now rather than at the sweep timer. On success it
       // stays: the confirming state_changed is already on its way.
@@ -821,6 +968,7 @@ QtObject {
     root.states = EntityStore.upsertState(root.states, entity)
     root.stateRevision++
     root.clearPendingToggle(entity.entity_id)
+    root.appendHistoryPoint(entity)
     if (isNew) {
       root.rebuildSortedIds()
       root.rebuildRows()
