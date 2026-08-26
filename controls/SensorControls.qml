@@ -166,17 +166,28 @@ Item {
 
   function strokeStepPath(ctx, frame) {
     var samples = frame.samples
-    var first = samples[0]
-    var startT = Math.max(first.t, frame.minT)
-    ctx.moveTo(control.xAt(frame, startT), control.yAt(frame, first.v))
-    for (var i = 1; i < samples.length; i++) {
-      var prev = samples[i - 1]
-      var next = samples[i]
-      ctx.lineTo(control.xAt(frame, next.t), control.yAt(frame, prev.v))
-      ctx.lineTo(control.xAt(frame, next.t), control.yAt(frame, next.v))
+    // Carry the earliest known value back to the window start so sparse
+    // sensors still fill the chart (same idea as HA's start-of-period state).
+    var startV = samples[0].v
+    var index = 0
+    while (index < samples.length && samples[index].t <= frame.minT) {
+      startV = samples[index].v
+      index++
     }
-    var last = samples[samples.length - 1]
-    ctx.lineTo(control.xAt(frame, frame.maxT), control.yAt(frame, last.v))
+    ctx.moveTo(control.xAt(frame, frame.minT), control.yAt(frame, startV))
+    var prevV = startV
+    if (index === 0) {
+      ctx.lineTo(control.xAt(frame, samples[0].t), control.yAt(frame, samples[0].v))
+      prevV = samples[0].v
+      index = 1
+    }
+    for (; index < samples.length; index++) {
+      var next = samples[index]
+      ctx.lineTo(control.xAt(frame, next.t), control.yAt(frame, prevV))
+      ctx.lineTo(control.xAt(frame, next.t), control.yAt(frame, next.v))
+      prevV = next.v
+    }
+    ctx.lineTo(control.xAt(frame, frame.maxT), control.yAt(frame, prevV))
   }
 
   function xAt(frame, t) {
@@ -263,8 +274,7 @@ Item {
           ctx.beginPath()
           control.strokeStepPath(ctx, frame)
           ctx.lineTo(control.xAt(frame, frame.maxT), frame.bottom)
-          ctx.lineTo(control.xAt(frame, Math.max(samples[0].t, frame.minT)),
-                     frame.bottom)
+          ctx.lineTo(control.xAt(frame, frame.minT), frame.bottom)
           ctx.closePath()
           ctx.fillStyle = Qt.rgba(control.fg.r, control.fg.g, control.fg.b, 0.16)
           ctx.fill()
