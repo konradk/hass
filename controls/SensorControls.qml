@@ -28,7 +28,9 @@ Item {
 
   function activateSelector(index) {
     if (index < 0 || index >= control.windows.length) return false
-    control.hours = control.windows[index]
+    var next = control.windows[index]
+    if (control.hours === next) control.reload()
+    else control.hours = next
     return true
   }
 
@@ -95,11 +97,50 @@ Item {
     if (!samples || samples.length === 0 || chart.width < 8 || chart.height < 8)
       return null
 
-    var minV = samples[0].v
-    var maxV = samples[0].v
-    for (var i = 1; i < samples.length; i++) {
-      if (samples[i].v < minV) minV = samples[i].v
-      if (samples[i].v > maxV) maxV = samples[i].v
+    var maxT = control.axisNow
+    var minT = maxT - control.hours * 3600
+    if (!(maxT > minT)) maxT = minT + 1
+
+    // Scale Y from values that actually appear in the visible window, including
+    // the held value from the last sample before minT (step-chart semantics).
+    var minV = 0
+    var maxV = 0
+    var have = false
+    var hold = null
+    for (var i = 0; i < samples.length; i++) {
+      var sample = samples[i]
+      if (sample.t < minT) {
+        hold = sample.v
+        continue
+      }
+      if (!have) {
+        if (hold !== null) {
+          minV = hold
+          maxV = hold
+          have = true
+        }
+      }
+      if (!have) {
+        minV = sample.v
+        maxV = sample.v
+        have = true
+      } else {
+        if (sample.v < minV) minV = sample.v
+        if (sample.v > maxV) maxV = sample.v
+      }
+    }
+    if (!have && hold !== null) {
+      minV = hold
+      maxV = hold
+      have = true
+    }
+    if (!have) {
+      minV = samples[0].v
+      maxV = samples[0].v
+      for (var j = 1; j < samples.length; j++) {
+        if (samples[j].v < minV) minV = samples[j].v
+        if (samples[j].v > maxV) maxV = samples[j].v
+      }
     }
     if (minV === maxV) {
       minV -= 1
@@ -108,10 +149,6 @@ Item {
     var pad = (maxV - minV) * 0.08
     minV -= pad
     maxV += pad
-
-    var maxT = control.axisNow
-    var minT = maxT - control.hours * 3600
-    if (!(maxT > minT)) maxT = minT + 1
 
     var left = Style.space(4)
     var right = chart.width - Style.space(4)
@@ -185,7 +222,10 @@ Item {
             onContainsMouseChanged: {
               if (containsMouse) control.selectorCursorRequested(index)
             }
-            onClicked: control.hours = modelData
+            onClicked: {
+              if (control.hours === modelData) control.reload()
+              else control.hours = modelData
+            }
           }
 
           Text {

@@ -358,6 +358,11 @@ section("control classification", () => {
        [{ t: -100, v: 1 }, { t: 3500, v: 2 }, { t: 3700, v: 3 }],
        1, 3600, 240),
      [{ t: 3500, v: 2 }, { t: 3700, v: 3 }]);
+  eq("a client clock ahead of Home Assistant still keeps samples",
+     Model.clampHistoryPoints(
+       [{ t: 1000, v: 1 }, { t: 2000, v: 2 }, { t: 3000, v: 3 }],
+       1, 10000, 240),
+     [{ t: 1000, v: 1 }, { t: 2000, v: 2 }, { t: 3000, v: 3 }]);
   const dense = [];
   for (let i = 0; i < 500; i++) dense.push({ t: 1000 + i, v: i });
   eq("history points are capped",

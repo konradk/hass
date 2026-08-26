@@ -108,15 +108,35 @@ function clampHistoryPoints(points, hours, now, maxPoints) {
   var windowHours = normalizeHistoryHours(hours)
   if (!points || !points.length || !windowHours) return []
   if (typeof now !== "number" || !isFinite(now)) return []
-  var start = now - windowHours * 3600
-  var kept = []
-  for (var i = 0; i < points.length; i++) {
-    var point = points[i]
-    if (!point) continue
-    if (typeof point.t !== "number" || !isFinite(point.t)) continue
-    if (typeof point.v !== "number" || !isFinite(point.v)) continue
-    if (point.t < start) continue
-    kept.push({ t: point.t, v: point.v })
+
+  function keepFrom(end) {
+    var start = end - windowHours * 3600
+    var kept = []
+    for (var i = 0; i < points.length; i++) {
+      var point = points[i]
+      if (!point) continue
+      if (typeof point.t !== "number" || !isFinite(point.t)) continue
+      if (typeof point.v !== "number" || !isFinite(point.v)) continue
+      if (point.t < start) continue
+      kept.push({ t: point.t, v: point.v })
+    }
+    return kept
+  }
+
+  var kept = keepFrom(now)
+  // Recorder timestamps follow Home Assistant's clock. If this desktop is ahead
+  // of the server, anchoring to Date.now() can drop every sample — fall back
+  // to the newest sample so a successful fetch still has something to draw.
+  if (!kept.length) {
+    var latest = null
+    for (var i = 0; i < points.length; i++) {
+      var point = points[i]
+      if (!point) continue
+      if (typeof point.t !== "number" || !isFinite(point.t)) continue
+      if (typeof point.v !== "number" || !isFinite(point.v)) continue
+      if (latest === null || point.t > latest) latest = point.t
+    }
+    if (latest !== null && latest < now) kept = keepFrom(latest)
   }
   return downsampleHistoryPoints(kept, maxPoints)
 }
