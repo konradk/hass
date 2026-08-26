@@ -14,6 +14,7 @@ Item {
   property QtObject bar: null
   property int selectorCursorIndex: -1
   property int hoverIndex: -1
+  property real axisNow: Date.now() / 1000
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
@@ -49,9 +50,13 @@ Item {
 
   onHoursChanged: {
     control.hoverIndex = -1
+    control.axisNow = Date.now() / 1000
     control.reload()
   }
-  onPlotRevisionChanged: chart.requestPaint()
+  onPlotRevisionChanged: {
+    control.axisNow = Date.now() / 1000
+    chart.requestPaint()
+  }
   onHoverIndexChanged: chart.requestPaint()
   Component.onCompleted: control.reload()
   Component.onDestruction: {
@@ -92,13 +97,9 @@ Item {
 
     var minV = samples[0].v
     var maxV = samples[0].v
-    var minT = samples[0].t
-    var maxT = samples[0].t
     for (var i = 1; i < samples.length; i++) {
       if (samples[i].v < minV) minV = samples[i].v
       if (samples[i].v > maxV) maxV = samples[i].v
-      if (samples[i].t < minT) minT = samples[i].t
-      if (samples[i].t > maxT) maxT = samples[i].t
     }
     if (minV === maxV) {
       minV -= 1
@@ -107,7 +108,10 @@ Item {
     var pad = (maxV - minV) * 0.08
     minV -= pad
     maxV += pad
-    if (minT === maxT) maxT = minT + 1
+
+    var maxT = control.axisNow
+    var minT = maxT - control.hours * 3600
+    if (!(maxT > minT)) maxT = minT + 1
 
     var left = Style.space(4)
     var right = chart.width - Style.space(4)
@@ -121,6 +125,21 @@ Item {
       left: left, right: right, top: top, bottom: bottom,
       spanX: spanX, spanY: spanY
     }
+  }
+
+  function strokeStepPath(ctx, frame) {
+    var samples = frame.samples
+    var first = samples[0]
+    var startT = Math.max(first.t, frame.minT)
+    ctx.moveTo(control.xAt(frame, startT), control.yAt(frame, first.v))
+    for (var i = 1; i < samples.length; i++) {
+      var prev = samples[i - 1]
+      var next = samples[i]
+      ctx.lineTo(control.xAt(frame, next.t), control.yAt(frame, prev.v))
+      ctx.lineTo(control.xAt(frame, next.t), control.yAt(frame, next.v))
+    }
+    var last = samples[samples.length - 1]
+    ctx.lineTo(control.xAt(frame, frame.maxT), control.yAt(frame, last.v))
   }
 
   function xAt(frame, t) {
@@ -202,25 +221,16 @@ Item {
           var samples = frame.samples
 
           ctx.beginPath()
-          ctx.moveTo(control.xAt(frame, samples[0].t),
-                     control.yAt(frame, samples[0].v))
-          for (var p = 1; p < samples.length; p++) {
-            ctx.lineTo(control.xAt(frame, samples[p].t),
-                       control.yAt(frame, samples[p].v))
-          }
-          ctx.lineTo(control.xAt(frame, samples[samples.length - 1].t), frame.bottom)
-          ctx.lineTo(control.xAt(frame, samples[0].t), frame.bottom)
+          control.strokeStepPath(ctx, frame)
+          ctx.lineTo(control.xAt(frame, frame.maxT), frame.bottom)
+          ctx.lineTo(control.xAt(frame, Math.max(samples[0].t, frame.minT)),
+                     frame.bottom)
           ctx.closePath()
           ctx.fillStyle = Qt.rgba(control.fg.r, control.fg.g, control.fg.b, 0.16)
           ctx.fill()
 
           ctx.beginPath()
-          ctx.moveTo(control.xAt(frame, samples[0].t),
-                     control.yAt(frame, samples[0].v))
-          for (var q = 1; q < samples.length; q++) {
-            ctx.lineTo(control.xAt(frame, samples[q].t),
-                       control.yAt(frame, samples[q].v))
-          }
+          control.strokeStepPath(ctx, frame)
           ctx.strokeStyle = control.fg
           ctx.lineWidth = Math.max(1.5, Style.space(2))
           ctx.stroke()
@@ -243,6 +253,16 @@ Item {
         }
       }
 
+      Timer {
+        interval: 30000
+        running: chart.visible
+        repeat: true
+        onTriggered: {
+          control.axisNow = Date.now() / 1000
+          chart.requestPaint()
+        }
+      }
+
       MouseArea {
         id: plotMouse
         anchors.fill: parent
@@ -252,6 +272,7 @@ Item {
         onExited: control.hoverIndex = -1
         onCanceled: control.hoverIndex = -1
         onPositionChanged: function(mouse) {
+          control.axisNow = Date.now() / 1000
           var frame = control.plotFrame()
           if (!frame) {
             control.hoverIndex = -1
@@ -324,7 +345,7 @@ Item {
         textFormat: Text.PlainText
         id: startLabel
         anchors.left: parent.left
-        text: control.formatClock(control.points[0].t)
+        text: control.formatClock(control.axisNow - control.hours * 3600)
         color: control.dim
         font.family: control.family
         font.pixelSize: Style.font.caption
@@ -346,7 +367,7 @@ Item {
       Text {
         textFormat: Text.PlainText
         anchors.right: parent.right
-        text: control.formatClock(control.points[control.points.length - 1].t)
+        text: control.formatClock(control.axisNow)
         color: control.dim
         font.family: control.family
         font.pixelSize: Style.font.caption

@@ -69,6 +69,7 @@ function hasHistoryGraph(entity) {
 }
 
 var HISTORY_HOURS = [1, 3, 6, 12, 24]
+var HISTORY_MAX_POINTS = 240
 
 function normalizeHistoryHours(hours) {
   if (typeof hours === "string" && hours.trim() !== "") hours = Number(hours)
@@ -85,18 +86,51 @@ function historyWindowLabel(hours) {
   return windowHours ? String(windowHours) + "h" : ""
 }
 
+function downsampleHistoryPoints(points, limit) {
+  if (!points || !points.length) return []
+  var cap = typeof limit === "number" && isFinite(limit) && limit > 0
+    ? Math.floor(limit) : HISTORY_MAX_POINTS
+  if (points.length <= cap) return points.slice()
+  if (cap === 1) return [points[points.length - 1]]
+  var lastIndex = points.length - 1
+  var out = []
+  var seen = {}
+  for (var step = 0; step < cap; step++) {
+    var index = Math.round(step * lastIndex / (cap - 1))
+    if (seen[index]) continue
+    seen[index] = true
+    out.push(points[index])
+  }
+  return out
+}
+
+function clampHistoryPoints(points, hours, now, maxPoints) {
+  var windowHours = normalizeHistoryHours(hours)
+  if (!points || !points.length || !windowHours) return []
+  if (typeof now !== "number" || !isFinite(now)) return []
+  var start = now - windowHours * 3600
+  var kept = []
+  for (var i = 0; i < points.length; i++) {
+    var point = points[i]
+    if (!point) continue
+    if (typeof point.t !== "number" || !isFinite(point.t)) continue
+    if (typeof point.v !== "number" || !isFinite(point.v)) continue
+    if (point.t < start) continue
+    kept.push({ t: point.t, v: point.v })
+  }
+  return downsampleHistoryPoints(kept, maxPoints)
+}
+
+// Last known sample at or before the cursor time (step-chart semantics).
 function nearestHistoryIndex(points, x, left, spanX, minT, maxT) {
   if (!points || !points.length || !(spanX > 0)) return -1
   if (!(maxT > minT)) return points.length - 1
   var t = minT + ((x - left) / spanX) * (maxT - minT)
+  if (t < points[0].t) return 0
   var best = 0
-  var bestDist = Math.abs(points[0].t - t)
-  for (var i = 1; i < points.length; i++) {
-    var dist = Math.abs(points[i].t - t)
-    if (dist < bestDist) {
-      best = i
-      bestDist = dist
-    }
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].t <= t) best = i
+    else break
   }
   return best
 }

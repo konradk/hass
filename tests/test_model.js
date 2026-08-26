@@ -341,13 +341,29 @@ section("control classification", () => {
      [1, 3, 6, 12, 24, 0, 3, 0]);
   eq("a day window is labelled 1d", Model.historyWindowLabel(24), "1d");
   eq("an hour window keeps an h suffix", Model.historyWindowLabel(12), "12h");
-  eq("the nearest sample is the one under the cursor",
+  eq("hover uses the last known sample at the cursor time",
      Model.nearestHistoryIndex(
        [{ t: 10, v: 1 }, { t: 20, v: 2 }, { t: 30, v: 3 }],
        75, 0, 100, 10, 30),
      1);
+  eq("hover after the last sample keeps the last value",
+     Model.nearestHistoryIndex(
+       [{ t: 10, v: 1 }, { t: 20, v: 2 }],
+       100, 0, 100, 10, 40),
+     1);
   eq("an empty series has no hover sample",
      Model.nearestHistoryIndex([], 10, 0, 100, 0, 1), -1);
+  eq("history points outside the window are dropped",
+     Model.clampHistoryPoints(
+       [{ t: -100, v: 1 }, { t: 3500, v: 2 }, { t: 3700, v: 3 }],
+       1, 3600, 240),
+     [{ t: 3500, v: 2 }, { t: 3700, v: 3 }]);
+  const dense = [];
+  for (let i = 0; i < 500; i++) dense.push({ t: 1000 + i, v: i });
+  eq("history points are capped",
+     Model.clampHistoryPoints(dense, 1, 2000, 240).length <= 240, true);
+  eq("history max points matches the bridge ceiling",
+     Model.HISTORY_MAX_POINTS, 240);
 
   eq("a dimmable light expands",
      Model.isExpandable(entity("light.a", "on",

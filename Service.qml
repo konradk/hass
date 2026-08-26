@@ -554,10 +554,13 @@ QtObject {
     var hours = Model.normalizeHistoryHours(event.hours)
     var current = root.historyByEntity[entityId]
     if (current && hours && current.hours && hours !== current.hours) return
+    var windowHours = hours || (current && current.hours) || 1
     root.historyByEntity[entityId] = {
       entityId: entityId,
-      hours: hours || (current && current.hours) || 1,
-      points: root.sanitizeHistoryPoints(event.points),
+      hours: windowHours,
+      points: Model.clampHistoryPoints(
+        root.sanitizeHistoryPoints(event.points),
+        windowHours, Date.now() / 1000, Model.HISTORY_MAX_POINTS),
       loading: false,
       error: ""
     }
@@ -572,17 +575,14 @@ QtObject {
     if (value === null) return
     var hours = entry.hours || 1
     var now = Date.now() / 1000
-    var start = now - hours * 3600
-    var points = []
     var existing = entry.points || []
-    for (var i = 0; i < existing.length; i++) {
-      if (existing[i].t >= start) points.push(existing[i])
-    }
+    var points = existing.slice()
     points.push({ t: now, v: value })
     root.historyByEntity[entity.entity_id] = {
       entityId: entity.entity_id,
       hours: hours,
-      points: points,
+      points: Model.clampHistoryPoints(
+        points, hours, now, Model.HISTORY_MAX_POINTS),
       loading: false,
       error: entry.error || ""
     }

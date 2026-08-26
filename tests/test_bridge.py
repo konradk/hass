@@ -966,6 +966,50 @@ def test_history_is_downsampled():
         server.stop()
 
 
+def test_history_uses_a_longer_timeout():
+    print("history: recorder requests get more than the ordinary 5s budget")
+    # 7s is past REQUEST_TIMEOUT but inside HISTORY_REQUEST_TIMEOUT.
+    server = FakeHA(delays={"history/history_during_period": 7.0})
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-slow"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-slow",
+            budget=15.0)
+        check("a slow history reply still succeeds",
+              history is not None and isinstance(history.get("points"), list),
+              history)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_history_timeout_is_reported():
+    print("history: an overdue recorder reply is reported as a failed command")
+    server = FakeHA(delays={"history/history_during_period": 22.0})
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-overdue"})
+        refused = bridge.wait_for(
+            lambda e: e["ev"] == "result" and e.get("tag") == "hist-overdue",
+            budget=28.0)
+        check("reports the overdue history request",
+              refused is not None and refused.get("ok") is False, refused)
+        check("keeps a timeout reason",
+              refused is not None
+              and "did not answer" in refused.get("error", "").lower(),
+              refused)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
 def main():
     for test in (test_live_happy_path,
                  test_rejected_service_call_is_reported,
@@ -1000,7 +1044,9 @@ def main():
                  test_local_url_without_a_trusted_network_is_never_used,
                  test_unknown_wifi_state_fails_closed,
                  test_demo_needs_no_server,
-                 test_history_is_downsampled):
+                 test_history_is_downsampled,
+                 test_history_uses_a_longer_timeout,
+                 test_history_timeout_is_reported):
         test()
         print()
 
