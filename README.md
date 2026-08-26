@@ -19,9 +19,9 @@ Quickshell plugin for **Omarchy 4**. Pick the devices and toggle lights, adjust 
 ## Keyboard
 
 With the panel open, `j`/`k` or `↑`/`↓` traverse device rows and their
-expanded controls. Inside expanded controls, `←`/`→` move between selectors;
-otherwise they switch area tabs. `enter` activates the selected row or opens
-the selected dropdown. `e` expands its controls, `s` opens settings, `r`
+expanded controls. Inside expanded controls, `←`/`→` move between selectors
+or history windows; otherwise they switch area tabs. `enter` activates the
+selected row or opens the selected dropdown. `e` expands its controls, `s` opens settings, `r`
 refreshes, `esc` closes, and `tab` moves to the next bar panel.
 
 ## What you can control
@@ -35,7 +35,8 @@ refreshes, `esc` closes, and `tab` moves to the next bar panel.
 | `media_player` | Previous / play-pause / next, volume slider |
 | `cover` | Open / stop / close |
 | `climate` | On/off when advertised, plus HVAC, fan, preset, swing, and target-temperature or low/high-band controls when advertised |
-| `sensor`, `binary_sensor`, everything else | State display only |
+| `sensor` | State, plus a 1h / 3h / 6h / 12h / 1d history graph when the value is numeric |
+| `binary_sensor`, everything else | State display only |
 
 Cameras not yet.
 

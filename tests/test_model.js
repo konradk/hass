@@ -325,6 +325,50 @@ section("control classification", () => {
   eq("scene is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
   eq("script is one-shot", Model.controlKind(entity("script.a", "off")), "activate");
   eq("sensor has no control", Model.controlKind(entity("sensor.a", "5")), "none");
+  eq("a numeric sensor is graphable",
+     Model.hasHistoryGraph(entity("sensor.a", "22.3")), true);
+  eq("a blank numeric parse is rejected",
+     Model.parseNumericState("  "), null);
+  eq("text sensors are not graphable",
+     Model.hasHistoryGraph(entity("sensor.weather", "sunny")), false);
+  eq("binary sensors are not graphable",
+     Model.hasHistoryGraph(entity("binary_sensor.a", "on")), false);
+  eq("history windows are 1, 3, 6, 12 or 24 hours",
+     [Model.normalizeHistoryHours(1), Model.normalizeHistoryHours(3),
+      Model.normalizeHistoryHours(6), Model.normalizeHistoryHours(12),
+      Model.normalizeHistoryHours(24), Model.normalizeHistoryHours(2),
+      Model.normalizeHistoryHours("3"), Model.normalizeHistoryHours(null)],
+     [1, 3, 6, 12, 24, 0, 3, 0]);
+  eq("a day window is labelled 1d", Model.historyWindowLabel(24), "1d");
+  eq("an hour window keeps an h suffix", Model.historyWindowLabel(12), "12h");
+  eq("hover uses the last known sample at the cursor time",
+     Model.nearestHistoryIndex(
+       [{ t: 10, v: 1 }, { t: 20, v: 2 }, { t: 30, v: 3 }],
+       75, 0, 100, 10, 30),
+     1);
+  eq("hover after the last sample keeps the last value",
+     Model.nearestHistoryIndex(
+       [{ t: 10, v: 1 }, { t: 20, v: 2 }],
+       100, 0, 100, 10, 40),
+     1);
+  eq("an empty series has no hover sample",
+     Model.nearestHistoryIndex([], 10, 0, 100, 0, 1), -1);
+  eq("history points outside the window are dropped",
+     Model.clampHistoryPoints(
+       [{ t: -100, v: 1 }, { t: 3500, v: 2 }, { t: 3700, v: 3 }],
+       1, 3600, 240),
+     [{ t: 3500, v: 2 }, { t: 3700, v: 3 }]);
+  eq("a client clock ahead of Home Assistant still keeps samples",
+     Model.clampHistoryPoints(
+       [{ t: 1000, v: 1 }, { t: 2000, v: 2 }, { t: 3000, v: 3 }],
+       1, 10000, 240),
+     [{ t: 1000, v: 1 }, { t: 2000, v: 2 }, { t: 3000, v: 3 }]);
+  const dense = [];
+  for (let i = 0; i < 500; i++) dense.push({ t: 1000 + i, v: i });
+  eq("history points are capped",
+     Model.clampHistoryPoints(dense, 1, 2000, 240).length <= 240, true);
+  eq("history max points matches the bridge ceiling",
+     Model.HISTORY_MAX_POINTS, 240);
 
   eq("a dimmable light expands",
      Model.isExpandable(entity("light.a", "on",
@@ -344,7 +388,12 @@ section("control classification", () => {
      Model.isExpandable(entity("cover.a", "open", { supported_features: 1 })), true);
   eq("cover without advertised actions does not expand",
      Model.isExpandable(entity("cover.a", "open", { supported_features: 0 })), false);
-  eq("sensor does not", Model.isExpandable(entity("sensor.a", "5")), false);
+  eq("a numeric sensor expands onto a graph",
+     Model.isExpandable(entity("sensor.a", "5")), true);
+  eq("an unavailable numeric sensor does not expand",
+     Model.isExpandable(entity("sensor.a", "unavailable")), false);
+  eq("a text sensor does not expand",
+     Model.isExpandable(entity("sensor.weather", "sunny")), false);
   // Every expandable domain must have a control to expand into; EntityRow maps
   // them by hand, and a camera has none.
   eq("camera does not expand onto an empty panel",
@@ -410,6 +459,14 @@ section("entity capabilities", () => {
   eq("unavailable controls are disabled", unavailable.expandable, false);
   eq("scenes remain activatable despite unknown state",
      Model.capabilitiesFor(entity("scene.a", "unknown")).activate, true);
+
+  const numericSensor = Model.capabilitiesFor(entity("sensor.a", "22.3", {
+    unit_of_measurement: "°C"
+  }));
+  eq("a numeric sensor advertises a history graph",
+     numericSensor.historyGraph, true);
+  eq("a numeric sensor reserves the expand slot",
+     numericSensor.reserveExpandSlot, true);
 });
 
 section("service calls", () => {

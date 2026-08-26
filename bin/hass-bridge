@@ -29,6 +29,9 @@ Commands (stdin)
         and an unwanted disclosure.
     {"op":"call_service","domain":"light","service":"turn_on",
      "entity_id":"light.x","data":{"brightness_pct":40},"tag":"..."}
+    {"op":"history","entity_id":"sensor.x","hours":1,"tag":"..."}
+        Recorder history for a numeric sensor. hours is 1, 3, 6, 12, or 24.
+        Uses a longer request timeout than ordinary commands.
     {"op":"refresh"}       re-request the full state snapshot
     {"op":"registries"}    re-request area/entity/device registries
     {"op":"shutdown"}
@@ -46,6 +49,9 @@ Events (stdout)
     {"ev":"config","unit_temperature":"°C"}   instance-wide unit system
     {"ev":"result","tag":"...","ok":true,"error":"...",
      "errorKind":"command"}
+    {"ev":"history","tag":"...","entity_id":"sensor.x","hours":1,
+     "points":[{"t":1710000000.0,"v":22.3}]}
+        Numeric samples only. Attributes from Home Assistant are stripped.
     {"ev":"log","level":"info|warn","msg":"..."}
 
 Flags
@@ -57,6 +63,7 @@ Flags
 """
 
 import json
+import math
 import os
 import queue
 import random
@@ -68,6 +75,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 
 # Runtime bytecode doesn't belong in the plugin checkout and isn't useful for
 # a small long-lived helper. Set this before loading the vendored package.
@@ -99,6 +107,9 @@ WS_SCHEMES = {"https": "wss", "http": "ws", "wss": "wss", "ws": "ws"}
 # How long we wait for Home Assistant to answer a request before giving the
 # shell its error back.
 REQUEST_TIMEOUT = 5.0
+# Recorder history can be slow on modest hardware or long windows; keep that
+# path separate so ordinary commands stay snappy.
+HISTORY_REQUEST_TIMEOUT = 20.0
 
 # Home Assistant's largest message is the initial get_states snapshot. Keep a
 # documented finite ceiling for both complete messages and individual frames;
@@ -129,6 +140,139 @@ LOCAL_CONNECT_TIMEOUT = 2.0
 # Bound on the nmcli call in current_wifi_ssid(), so a hung network stack
 # cannot wedge the bridge's single-threaded run loop.
 NETWORK_CHECK_TIMEOUT = 2.0
+
+HISTORY_HOURS = (1, 3, 6, 12, 24)
+HISTORY_MAX_POINTS = 240
+SENSOR_ENTITY_RE = re.compile(r"^sensor\.[a-zA-Z0-9_]+$")
+
+
+def normalize_history_hours(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    hours = int(value)
+    if hours != value or hours not in HISTORY_HOURS:
+        return None
+    return hours
+
+
+def valid_sensor_entity_id(entity_id):
+    return isinstance(entity_id, str) and SENSOR_ENTITY_RE.match(entity_id) is not None
+
+
+def parse_numeric_state(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+def parse_history_timestamp(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return stamp.timestamp()
+    return None
+
+
+def parse_history_point(item):
+    if not isinstance(item, dict):
+        return None
+    value = parse_numeric_state(item.get("s"))
+    if value is None:
+        value = parse_numeric_state(item.get("state"))
+    if value is None:
+        return None
+    timestamp = parse_history_timestamp(item.get("lu"))
+    if timestamp is None:
+        timestamp = parse_history_timestamp(item.get("last_updated"))
+    if timestamp is None:
+        timestamp = parse_history_timestamp(item.get("last_changed"))
+    if timestamp is None:
+        return None
+    return {"t": timestamp, "v": value}
+
+
+def downsample_history_points(points, limit=HISTORY_MAX_POINTS):
+    if not isinstance(points, list) or len(points) <= limit:
+        return list(points or [])
+    if limit <= 0:
+        return []
+    if limit == 1:
+        return [points[-1]]
+    last_index = len(points) - 1
+    out = []
+    seen = set()
+    for step in range(limit):
+        index = round(step * last_index / (limit - 1))
+        if index in seen:
+            continue
+        seen.add(index)
+        out.append(points[index])
+    return out
+
+
+def extract_history_points(result, entity_id):
+    if not isinstance(result, dict):
+        return []
+    rows = result.get(entity_id) if isinstance(entity_id, str) else None
+    if not isinstance(rows, list) and len(result) == 1:
+        only = next(iter(result.values()))
+        rows = only if isinstance(only, list) else []
+    if not isinstance(rows, list):
+        return []
+    points = []
+    for item in rows:
+        point = parse_history_point(item)
+        if point is not None:
+            points.append(point)
+    points.sort(key=lambda point: point["t"])
+    return downsample_history_points(points)
+
+
+def isoformat_z(moment):
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def demo_history_points(hours, current_state):
+    end = time.time()
+    start = end - hours * 3600.0
+    count = min(HISTORY_MAX_POINTS, max(24, hours * 60))
+    span = end - start
+    points = []
+    for index in range(count):
+        stamp = start + span * index / (count - 1)
+        phase = (stamp - start) / 3600.0
+        value = 22.0 + math.sin(phase * 1.7) * 1.4 + math.sin(phase * 4.3) * 0.3
+        points.append({"t": stamp, "v": round(value, 2)})
+    current = parse_numeric_state(current_state)
+    if current is not None and points:
+        points[-1] = {"t": end, "v": current}
+    return points
 
 
 def current_wifi_ssid():
@@ -434,6 +578,8 @@ class DemoTransport:
             self._ok(msg_id, {"unit_system": {"temperature": "°C"}})
         elif kind == "call_service":
             self._call_service(obj)
+        elif kind == "history/history_during_period":
+            self._history(obj)
         else:
             self._fail(msg_id, "demo backend does not implement %s" % kind)
 
@@ -452,6 +598,25 @@ class DemoTransport:
         if isinstance(entity_id, list):
             entity_id = entity_id[0] if entity_id else None
         return entity_id
+
+    def _history(self, obj):
+        msg_id = obj.get("id")
+        entity_ids = obj.get("entity_ids") or []
+        entity_id = entity_ids[0] if entity_ids else None
+        if not valid_sensor_entity_id(entity_id):
+            self._fail(msg_id, "Invalid sensor entity id.")
+            return
+        start_time = parse_history_timestamp(obj.get("start_time"))
+        end_time = parse_history_timestamp(obj.get("end_time"))
+        hours = 1
+        if start_time is not None and end_time is not None and end_time > start_time:
+            hours = max(1, int(round((end_time - start_time) / 3600.0)))
+        hours = hours if hours in HISTORY_HOURS else 1
+        state = self._states.get(entity_id, {}).get("state")
+        points = demo_history_points(hours, state)
+        self._ok(msg_id, {
+            entity_id: [{"s": str(point["v"]), "lu": point["t"]} for point in points]
+        })
 
     def _call_service(self, obj):
         msg_id = obj.get("id")
@@ -679,7 +844,7 @@ class Bridge:
         obj.setdefault("protocolVersion", PROTOCOL_VERSION)
         if obj.get("ev") in {
                 "phase", "states", "state_changed", "removed",
-                "registries", "config", "result", "log"}:
+                "registries", "config", "result", "history", "log"}:
             obj.setdefault("generation", self.generation)
         line = json.dumps(obj, ensure_ascii=False)
         with self._out_lock:
@@ -768,6 +933,8 @@ class Bridge:
             self.request_registries()
         elif op == "call_service":
             self.call_service(command)
+        elif op == "history":
+            self.request_history(command)
         else:
             self.log("warn", "unknown op %r" % op)
 
@@ -859,6 +1026,37 @@ class Bridge:
             payload["target"] = {"entity_id": entity_id}
         self.request("call_service", payload, tag=tag)
 
+    def request_history(self, command):
+        tag = command.get("tag")
+        entity_id = command.get("entity_id")
+        hours = normalize_history_hours(command.get("hours"))
+        if not valid_sensor_entity_id(entity_id):
+            self.emit_result(tag, False, "Invalid sensor entity id.")
+            return
+        if hours is None:
+            self.emit_result(tag, False, "History window must be 1, 3, 6, 12, or 24 hours.")
+            return
+        if not self.authenticated or self.phase != "connected":
+            self.emit_result(tag, False, "Not connected to Home Assistant.")
+            return
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
+        payload = {
+            "type": "history/history_during_period",
+            "start_time": isoformat_z(start),
+            "end_time": isoformat_z(end),
+            "entity_ids": [entity_id],
+            "include_start_time_state": True,
+            "significant_changes_only": False,
+            "minimal_response": True,
+            "no_attributes": True,
+        }
+        msg_id = self.request("history", payload, tag=tag,
+                              timeout=HISTORY_REQUEST_TIMEOUT)
+        if msg_id is not None:
+            self.pending[msg_id]["entity_id"] = entity_id
+            self.pending[msg_id]["hours"] = hours
+
     # -- request plumbing --------------------------------------------------
 
     def next_id(self):
@@ -875,19 +1073,21 @@ class Bridge:
             payload["errorKind"] = "command"
         self.emit(payload)
 
-    def request(self, kind, payload, tag=None, critical=False, batch=None):
+    def request(self, kind, payload, tag=None, critical=False, batch=None,
+                timeout=None):
         if not self.transport or not self.authenticated:
             self.emit_result(tag, False, "Not connected to Home Assistant.")
             return None
         if kind == "call_service" and self.phase != "connected":
             self.emit_result(tag, False, "Home Assistant is still synchronizing.")
             return None
+        wait = REQUEST_TIMEOUT if timeout is None else float(timeout)
         msg_id = self.next_id()
         payload = dict(payload)
         payload["id"] = msg_id
         self.pending[msg_id] = {
             "kind": kind, "tag": tag,
-            "deadline": now() + REQUEST_TIMEOUT,
+            "deadline": now() + wait,
             "critical": critical,
             "epoch": self.transport_epoch,
             "batch": batch,
@@ -1231,6 +1431,19 @@ class Bridge:
             units = units if isinstance(units, dict) else {}
             self.emit({"ev": "config",
                        "unit_temperature": units.get("temperature", "")})
+        elif kind == "history":
+            entity_id = pending.get("entity_id")
+            hours = pending.get("hours")
+            points = extract_history_points(result, entity_id)
+            payload = {
+                "ev": "history",
+                "entity_id": entity_id,
+                "hours": hours,
+                "points": points,
+            }
+            if tag:
+                payload["tag"] = str(tag)
+            self.emit(payload)
         elif tag:
             self.emit_result(tag, True)
 

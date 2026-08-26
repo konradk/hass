@@ -137,6 +137,8 @@ class FakeHA:
                             "supported_color_modes": ["brightness"]}},
         ]
         self.calls = []
+        self.history_requests = []
+        self.history_point_count = 12
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self._server = socket.socket(family)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -278,6 +280,24 @@ class FakeHA:
             send_json(conn, {"type": "event", "event": {
                 "event_type": "state_changed",
                 "data": {"entity_id": "light.test", "new_state": self.states[0]}}})
+        elif kind == "history/history_during_period":
+            self.history_requests.append(msg)
+            entity_ids = msg.get("entity_ids") or []
+            entity_id = entity_ids[0] if entity_ids else "sensor.test"
+            now = time.time()
+            rows = [{
+                "s": "unavailable",
+                "lu": now - (self.history_point_count + 1) * 10,
+                "a": {"access_token": "leak-me", "friendly_name": "Secret"},
+            }]
+            for index in range(self.history_point_count):
+                rows.append({
+                    "s": str(round(20 + index * 0.01, 2)),
+                    "lu": now - (self.history_point_count - index) * 10,
+                    "a": {"access_token": "leak-me"},
+                })
+            send_json(conn, {"id": msg_id, "type": "result", "success": True,
+                             "result": {entity_id: rows}})
         else:
             send_json(conn, {"id": msg_id, "type": "result", "success": False,
                              "error": {"code": "unknown", "message": "no such command"}})
