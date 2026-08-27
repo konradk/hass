@@ -95,6 +95,12 @@ card for temperature, humidity, particulate matter, VOC, carbon dioxide and
 other available readings. Individual sensor entities remain available in the
 other categories and can still be starred separately.
 
+Hover a room card header to add the whole group to the bar, or hover one of
+its reading tiles to add only that reading. Both can coexist as independent
+bar widgets. Values use the active Omarchy theme and air quality readings carry
+the same quality colours as the room card. Left click a data widget to open
+Home Assistant and right click it to remove that exact widget from the bar.
+
 Optionally, turn on **Local network URL** to add your instance's LAN address.
 It's the same Home Assistant instance reached by a different address, so it
 reuses the one access token above rather than needing its own. It also asks
@@ -127,6 +133,7 @@ node    tests/test_config.js     # config normalization and secret exclusion
 node    tests/test_store.js      # state and registry projections
 node    tests/test_model.js      # entity formatting and classification
 node    tests/test_row_model.js  # ListModel row projection
+node    tests/test_bar_data.js   # repeated bar widget identity and placement
 python3 tests/test_qml_style.py  # UI house style (fonts, palette, tokens)
 ```
 

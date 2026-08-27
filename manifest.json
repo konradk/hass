@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "hass",
   "name": "Home Assistant",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": "Konrad Kruk",
   "license": "MIT",
   "description": "View and control Home Assistant devices from the Omarchy bar.",
@@ -13,14 +13,14 @@
   ],
   "entryPoints": {
     "service": "Service.qml",
-    "barWidget": "Panel.qml",
+    "barWidget": "BarWidget.qml",
     "overlay": "Settings.qml"
   },
   "barWidget": {
     "displayName": "Home Assistant",
-    "description": "Favorites-first control of Home Assistant entities.",
+    "description": "Control Home Assistant and show selected sensor readings.",
     "category": "Home",
-    "allowMultiple": false,
+    "allowMultiple": true,
     "defaultSection": "right"
   }
 }
