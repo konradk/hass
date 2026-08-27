@@ -287,6 +287,7 @@ DEMO_DEVICES = {
     "camera.garage_driveway": ("device.garage_camera", "garage"),
     "lock.garage_side_door": ("device.garage_side_door", "garage"),
     "binary_sensor.garage_motion": ("device.garage_motion", "garage"),
+    "button.garage_door_remote": ("device.garage_remote", "garage"),
 }
 
 DEMO_PLAYLIST = [
@@ -365,6 +366,10 @@ def demo_initial_states():
             "friendly_name": "Garage Side Door Lock", "icon": "mdi:lock"}),
         entity("binary_sensor.garage_motion", "off", {
             "friendly_name": "Garage Motion", "device_class": "motion", "icon": "mdi:run"}),
+        # A button has no on/off state at all: it reports when it was last
+        # pressed, or "unknown" until it first is.
+        entity("button.garage_door_remote", "unknown", {
+            "friendly_name": "Garage Remote"}),
     ]
 
 
@@ -465,7 +470,12 @@ class DemoTransport:
             return
 
         pair = (domain, service)
-        if pair == ("scene", "turn_on"):
+        if service == "press" and domain in ("button", "input_button"):
+            # Home Assistant answers a press by stamping the entity with the
+            # time it happened; there is no state to toggle.
+            self._set_state(entity_id, time.strftime(
+                "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()))
+        elif pair == ("scene", "turn_on"):
             self._set_state(entity_id, "scening")
             self._set_state("light.living_room_lamp", "on")
             self._set_attrs("light.living_room_lamp", {"brightness": 220})

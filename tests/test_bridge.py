@@ -791,7 +791,7 @@ def test_demo_needs_no_server():
     try:
         bridge.send({"op": "config"})
         states = bridge.wait_for(lambda e: e["ev"] == "states")
-        check("serves the demo house", states is not None and len(states["entities"]) == 14)
+        check("serves the demo house", states is not None and len(states["entities"]) == 15)
 
         climate_id = "climate.living_room_thermostat"
         bridge.send({"op": "call_service", "domain": "climate", "service": "turn_off",
@@ -847,6 +847,17 @@ def test_demo_needs_no_server():
             and e["entity"]["attributes"].get("swing_mode") == "both")
         check("sets the advertised demo climate swing mode", swing_mode is not None, swing_mode)
 
+
+        button_id = "button.garage_door_remote"
+        bridge.send({"op": "call_service", "domain": "button", "service": "press",
+                     "entity_id": button_id, "tag": "demo-button"})
+        pressed = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == button_id)
+        # A press has no on/off answer: the state becomes the time it happened.
+        check("presses a demo button",
+              pressed is not None and pressed["entity"]["state"] != "unknown",
+              pressed)
 
         bridge.send({"op": "call_service", "domain": "cover", "service": "open_cover",
                      "entity_id": "cover.garage_door", "tag": "demo-1"})

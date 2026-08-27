@@ -672,14 +672,16 @@ QtObject {
     return root.rejectAction("This entity has no on/off control.")
   }
 
+  // Also the entry point for a button press: same one-shot shape, and only the
+  // service name differs, so `Model.activateCall` picks it per domain.
   function activateScene(entityId) {
-    if (!root.capabilities(entityId).activate) {
-      return root.rejectAction("Only scenes and scripts can be activated.")
+    var call = Model.activateCall(root.states[entityId])
+    if (!call || !root.capabilities(entityId).activate) {
+      return root.rejectAction("Only scenes, scripts, and buttons can be activated.")
     }
-    var domain = Model.domainOf(entityId)
     // A tag, not a bool: IPC and the row both read this for truth alone, and
     // an unsent call still comes back falsy.
-    return root.callTagged(domain, "turn_on", entityId, {})
+    return root.callTagged(call.domain, call.service, entityId, {})
   }
 
   function setClimateHvacMode(entityId, mode) {

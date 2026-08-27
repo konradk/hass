@@ -32,6 +32,7 @@ refreshes, `esc` closes, and `tab` moves to the next bar panel.
 | `switch`, `fan`, `input_boolean`, `humidifier` | On/off |
 | `lock` | Lock/unlock switch |
 | `scene`, `script` | Activate button |
+| `button`, `input_button` | Press button |
 | `media_player` | Previous / play-pause / next, volume slider |
 | `cover` | Open / stop / close |
 | `climate` | On/off when advertised, plus HVAC, fan, preset, swing, and target-temperature or low/high-band controls when advertised |
@@ -46,6 +47,7 @@ The panel is reachable over the shell's IPC, so a device can go on a keybind:
 ```bash
 omarchy-shell hass toggleEntity light.desk
 omarchy-shell hass activate scene.movie_night
+omarchy-shell hass activate button.front_door   # presses a button entity
 omarchy-shell hass expand climate.hallway   # opens the panel, unfolded
 omarchy-shell hass favorite light.desk      # add to / remove from the panel
 omarchy-shell hass status

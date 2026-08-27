@@ -5,6 +5,12 @@
 
 var TOGGLEABLE_DOMAINS = ["light", "switch", "fan", "input_boolean", "humidifier"]
 
+// One-shot domains: activating one runs something rather than putting a device
+// into a state, so the row gets a play button instead of a switch. The service
+// differs — a scene or script is turned on, a button is pressed.
+var ACTIVATE_DOMAINS = ["scene", "script", "button", "input_button"]
+var PRESS_DOMAINS = ["button", "input_button"]
+
 function attrs(entity) {
   return (entity && entity.attributes) ? entity.attributes : {}
 }
@@ -39,11 +45,16 @@ function isUnavailable(entity) {
   return state === "unavailable" || state === "unknown"
 }
 
-// A scene's state is when it last ran, or "unknown" — not a reason to grey it out.
+// A one-shot entity's state is when it last ran or was last pressed, or
+// "unknown" — not a reason to grey it out.
 function isAvailable(entity) {
   if (!entity) return false
   if (controlKind(entity) === "activate") return true
   return !isUnavailable(entity)
+}
+
+function isActivatable(entity) {
+  return ACTIVATE_DOMAINS.indexOf(domain(entity)) !== -1
 }
 
 function isToggleable(entity) {
@@ -109,6 +120,7 @@ function subtitle(entity, unitFallback) {
 function badgeText(entity) {
   var dom = domain(entity)
   if (dom === "scene") return "Scene"
+  if (PRESS_DOMAINS.indexOf(dom) !== -1) return "Button"
   if (dom === "camera") return "Camera"
   if (dom === "climate") {
     // The HVAC mode is the entity's state, not an attribute; `hvac_action` is
@@ -685,7 +697,7 @@ function capabilitiesFor(entity) {
   var dom = domain(entity)
   var a = attrs(entity)
   var bits = featureBits(entity)
-  var activate = dom === "scene" || dom === "script"
+  var activate = isActivatable(entity)
   var available = !!entity && (activate || !isUnavailable(entity))
   var result = {
     available: available,
@@ -996,6 +1008,8 @@ var DOMAIN_ICONS = {
   "sensor": "󰊚",               // md-gauge
   "binary_sensor": "󰶑",        // md-motion_sensor
   "automation": "󰚩",           // md-robot
+  "button": "󱊨",               // md-gesture_tap_button
+  "input_button": "󱊩",         // md-gesture_tap_box
   "script": "󰯂",               // md-script_text
   "vacuum": "󰜍",               // md-robot_vacuum
   "person": "󰀄",               // md-account
@@ -1033,12 +1047,24 @@ function toggleCall(entity, currentlyOn) {
   return { domain: "homeassistant", service: "toggle" }
 }
 
+// The one-shot call for an activatable entity, or null for anything else.
+// `button.press` is not `button.turn_on`: the press domains have no on/off
+// service at all, so turning one on fails silently in the bar.
+function activateCall(entity) {
+  var dom = domain(entity)
+  if (ACTIVATE_DOMAINS.indexOf(dom) === -1) return null
+  return {
+    domain: dom,
+    service: PRESS_DOMAINS.indexOf(dom) !== -1 ? "press" : "turn_on"
+  }
+}
+
 // "toggle" | "lock" (switch calling lock/unlock) | "activate" (one-shot) | "none".
 function controlKind(entity) {
   var dom = domain(entity)
   if (isToggleable(entity)) return "toggle"
   if (dom === "lock") return "lock"
-  if (dom === "scene" || dom === "script") return "activate"
+  if (isActivatable(entity)) return "activate"
   return "none"
 }
 
@@ -1054,7 +1080,8 @@ var DEMO_DEFAULT_FAVORITES = [
   "switch.kitchen_coffee_maker",
   "sensor.kitchen_temperature",
   "cover.garage_door",
-  "lock.garage_side_door"
+  "lock.garage_side_door",
+  "button.garage_door_remote"
 ]
 
 // Scoped to picked devices, so the count stays verifiable. Locks excluded:
@@ -1089,7 +1116,8 @@ var DOMAIN_FILTERS = [
   { id: "all", title: "All", domains: [] },
   { id: "lights", title: "Lights", domains: ["light"] },
   { id: "controls", title: "Controls",
-    domains: ["switch", "fan", "input_boolean", "humidifier", "lock", "scene", "script"] },
+    domains: ["switch", "fan", "input_boolean", "humidifier", "lock", "scene",
+              "script", "button", "input_button"] },
   { id: "climate", title: "Climate", domains: ["climate"] },
   { id: "media", title: "Media", domains: ["media_player"] },
   { id: "covers", title: "Covers", domains: ["cover"] },
