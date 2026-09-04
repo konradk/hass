@@ -7,6 +7,7 @@ IPv6, and what happens when the server hangs up.
 """
 
 import base64
+import email.utils
 import hashlib
 import json
 import os
@@ -77,7 +78,7 @@ def send_declared_frame(conn, opcode, length, fin=True):
                  + struct.pack("!Q", length))
 
 
-def handshake(conn):
+def handshake(conn, server_time=None):
     raw = b""
     while b"\r\n\r\n" not in raw:
         chunk = conn.recv(4096)
@@ -95,7 +96,9 @@ def handshake(conn):
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n\r\n" % accept
+        "Date: %s\r\n"
+        "Sec-WebSocket-Accept: %s\r\n\r\n"
+        % (email.utils.formatdate(server_time or time.time(), usegmt=True), accept)
     ).encode())
     return [rest]
 
@@ -113,7 +116,8 @@ class FakeHA:
     def __init__(self, auth_mode="ok", drop_after=None, fail_calls=False,
                  giant_frame=False, fail_requests=None, delays=None,
                  invalid_message=False, empty_fragments=0,
-                 host="127.0.0.1", tls=False, echo_auth_token=False):
+                 host="127.0.0.1", tls=False, echo_auth_token=False,
+                 server_time_offset=0):
         self.auth_mode = auth_mode
         self.drop_after = drop_after
         # Reject every call_service. Home Assistant does this for a service
@@ -130,6 +134,7 @@ class FakeHA:
         self.host = host
         self.tls = tls
         self.echo_auth_token = echo_auth_token
+        self.server_time_offset = float(server_time_offset)
         self.connections = 0
         self.states = [
             {"entity_id": "light.test", "state": "off",
@@ -137,6 +142,8 @@ class FakeHA:
                             "supported_color_modes": ["brightness"]}},
         ]
         self.calls = []
+        self.history_requests = []
+        self.history_point_count = 12
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self._server = socket.socket(family)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -181,7 +188,7 @@ class FakeHA:
         try:
             if self._tls_context is not None:
                 conn = self._tls_context.wrap_socket(conn, server_side=True)
-            buf = handshake(conn)
+            buf = handshake(conn, time.time() + self.server_time_offset)
             send_json(conn, {"type": "auth_required", "ha_version": "test"})
             handled = 0
             while not self._stop.is_set():
@@ -278,6 +285,40 @@ class FakeHA:
             send_json(conn, {"type": "event", "event": {
                 "event_type": "state_changed",
                 "data": {"entity_id": "light.test", "new_state": self.states[0]}}})
+        elif kind == "history/history_during_period":
+            self.history_requests.append(msg)
+            result = {}
+            for entity_id in msg.get("entity_ids") or []:
+                if entity_id == "sensor.dense_power":
+                    result[entity_id] = [
+                        {"s": str(100 + index % 30), "lu": 1787824800 + index}
+                        for index in range(700)
+                    ] + [
+                        {"s": "0", "lu": 1787828400 + index * 900}
+                        for index in range(12)
+                    ]
+                elif entity_id == "sensor.air_temperature":
+                    result[entity_id] = [
+                        {"s": "20.5", "lu": 1787824800},
+                        {"s": "unknown", "lu": 1787828400},
+                        {"s": "21.25", "lu": 1787832000},
+                    ]
+                else:
+                    now = time.time()
+                    rows = [{
+                        "s": "unavailable",
+                        "lu": now - (self.history_point_count + 1) * 10,
+                        "a": {"access_token": "leak-me", "friendly_name": "Secret"},
+                    }]
+                    for index in range(self.history_point_count):
+                        rows.append({
+                            "s": str(round(20 + index * 0.01, 2)),
+                            "lu": now - (self.history_point_count - index) * 10,
+                            "a": {"access_token": "leak-me"},
+                        })
+                    result[entity_id] = rows
+            send_json(conn, {"id": msg_id, "type": "result", "success": True,
+                             "result": result})
         else:
             send_json(conn, {"id": msg_id, "type": "result", "success": False,
                              "error": {"code": "unknown", "message": "no such command"}})

@@ -49,6 +49,7 @@ QtObject {
 
   property var areaNames: Object.create(null)
   property var entityArea: Object.create(null)
+  property var entityDevice: Object.create(null)
   property var deviceNames: Object.create(null)
   property var deviceInfo: Object.create(null)
   property var deviceArea: Object.create(null)
@@ -67,6 +68,10 @@ QtObject {
   property var demoPinnedRoomReadings: []
   readonly property var pinnedRoomReadings: root.demoMode
     ? root.demoPinnedRoomReadings : root.livePinnedRoomReadings
+  property var livePinnedEntities: []
+  property var demoPinnedEntities: []
+  readonly property var pinnedEntities: root.demoMode
+    ? root.demoPinnedEntities : root.livePinnedEntities
   property var livePanelOrder: []
   property var demoPanelOrder: []
   readonly property var panelOrder: root.demoMode
@@ -95,6 +100,12 @@ QtObject {
   // unit of their own, so without this every temperature renders bare.
   property string temperatureUnit: ""
 
+  // Last requested recorder window per sensor. historyRevision invalidates
+  // bindings that walk the nested points array.
+  property var historyByEntity: ({})
+  property var pendingHistoryTags: ({})
+  property int historyRevision: 0
+
   // ------------------------------------------------------------ config
 
   property FileView configFile: FileView {
@@ -119,6 +130,8 @@ QtObject {
       demoRoomReadings: root.demoRoomReadings.slice(),
       pinnedRoomReadings: root.livePinnedRoomReadings.slice(),
       demoPinnedRoomReadings: root.demoPinnedRoomReadings.slice(),
+      pinnedEntities: root.livePinnedEntities.slice(),
+      demoPinnedEntities: root.demoPinnedEntities.slice(),
       panelOrder: root.livePanelOrder.slice(),
       demoPanelOrder: root.demoPanelOrder.slice(),
       groupByArea: root.groupByArea,
@@ -162,16 +175,20 @@ QtObject {
   function toggleFavorite(entityId) {
     var favorites = root.favorites.slice()
     var order = root.panelOrder.slice()
+    var pinned = root.pinnedEntities.slice()
     var index = favorites.indexOf(entityId)
     if (index === -1) {
       favorites.push(entityId)
       if (order.indexOf(entityId) === -1) order.push(entityId)
     } else {
       favorites.splice(index, 1)
+      var pinnedIndex = pinned.indexOf(entityId)
+      if (pinnedIndex !== -1) pinned.splice(pinnedIndex, 1)
       var orderIndex = order.indexOf(entityId)
       if (orderIndex !== -1) order.splice(orderIndex, 1)
     }
-    root.savePanelSelection(favorites, root.roomReadings.slice(), order)
+    root.savePanelSelection(favorites, root.roomReadings.slice(), order,
+                            undefined, pinned)
   }
 
   function movePanelItem(itemId, delta) {
@@ -189,18 +206,23 @@ QtObject {
       ? { demoPanelOrder: order } : { panelOrder: order })
   }
 
-  function savePanelSelection(favorites, roomReadings, order, pinnedRooms) {
+  function savePanelSelection(favorites, roomReadings, order, pinnedRooms,
+                              pinnedEntityIds) {
     var pins = pinnedRooms === undefined
       ? root.pinnedRoomReadings.slice() : pinnedRooms
+    var entityPins = pinnedEntityIds === undefined
+      ? root.pinnedEntities.slice() : pinnedEntityIds
     root.saveConfig(root.demoMode ? {
       demoFavorites: favorites,
       demoRoomReadings: roomReadings,
       demoPinnedRoomReadings: pins,
+      demoPinnedEntities: entityPins,
       demoPanelOrder: order
     } : {
       favorites: favorites,
       roomReadings: roomReadings,
       pinnedRoomReadings: pins,
+      pinnedEntities: entityPins,
       panelOrder: order
     })
   }
@@ -244,6 +266,20 @@ QtObject {
     else pinned.splice(index, 1)
     root.savePanelSelection(root.favorites.slice(), root.roomReadings.slice(),
                             root.panelOrder.slice(), pinned)
+  }
+
+  function isEntityPinned(entityId) {
+    return root.pinnedEntities.indexOf(entityId) !== -1
+  }
+
+  function toggleEntityPinned(entityId) {
+    if (!root.isFavorite(entityId)) return
+    var pinned = root.pinnedEntities.slice()
+    var index = pinned.indexOf(entityId)
+    if (index === -1) pinned.push(entityId)
+    else pinned.splice(index, 1)
+    root.savePanelSelection(root.favorites.slice(), root.roomReadings.slice(),
+                            root.panelOrder.slice(), undefined, pinned)
   }
 
   // ------------------------------------------------------------ credentials
@@ -306,7 +342,8 @@ QtObject {
     root.connectionSuppressed = false
     root.saveConfig({
       baseUrl: "", localUrl: "", trustedNetwork: "", demoMode: false,
-      favorites: [], roomReadings: [], pinnedRoomReadings: [], panelOrder: [],
+      favorites: [], roomReadings: [], pinnedRoomReadings: [],
+      pinnedEntities: [], panelOrder: [],
       displayNameOverrides: {}, iconOverrides: {}, selectedTab: "favorites"
     })   // demoFavorites untouched: not part of the connection
   }
@@ -415,6 +452,8 @@ QtObject {
     root.demoRoomReadings = config.demoRoomReadings
     root.livePinnedRoomReadings = config.pinnedRoomReadings
     root.demoPinnedRoomReadings = config.demoPinnedRoomReadings
+    root.livePinnedEntities = config.pinnedEntities
+    root.demoPinnedEntities = config.demoPinnedEntities
     root.livePanelOrder = config.panelOrder
     root.demoPanelOrder = config.demoPanelOrder
     root.displayNameOverrides = config.displayNameOverrides
@@ -440,6 +479,7 @@ QtObject {
     root.sortedEntityIds = []
     root.areaNames = Object.create(null)
     root.entityArea = Object.create(null)
+    root.entityDevice = Object.create(null)
     root.deviceNames = Object.create(null)
     root.deviceInfo = Object.create(null)
     root.deviceArea = Object.create(null)
@@ -449,6 +489,7 @@ QtObject {
     root.pendingToggles = ({})
     root.pendingToggleRevision++
     pendingSweep.running = false
+    root.clearHistory()
     root.rebuildRows()
   }
 
@@ -572,6 +613,129 @@ QtObject {
     })
   }
 
+  function historyFor(entityId) {
+    root.historyRevision
+    return root.historyByEntity[entityId] || null
+  }
+
+  function clearHistory(entityId) {
+    if (entityId) {
+      if (root.historyByEntity[entityId] === undefined
+          && root.pendingHistoryTags[entityId] === undefined) return
+      delete root.historyByEntity[entityId]
+      delete root.pendingHistoryTags[entityId]
+    } else {
+      root.historyByEntity = ({})
+      root.pendingHistoryTags = ({})
+    }
+    root.historyRevision++
+  }
+
+  function sanitizeHistoryPoints(raw) {
+    if (!raw || !raw.length) return []
+    var out = []
+    for (var i = 0; i < raw.length; i++) {
+      var point = raw[i]
+      if (!point) continue
+      if (typeof point.t !== "number" || !isFinite(point.t)) continue
+      if (point.v !== null
+          && (typeof point.v !== "number" || !isFinite(point.v))) continue
+      out.push({ t: point.t, v: point.v })
+    }
+    return out
+  }
+
+  function requestHistory(entityId, hours) {
+    var windowHours = Model.normalizeHistoryHours(hours)
+    if (!windowHours) return root.rejectAction("Invalid history window.")
+    if (!root.capabilities(entityId).historyGraph) {
+      return root.rejectAction("This sensor does not have a history graph.")
+    }
+    var tag = root.callTag(entityId)
+    root.pendingHistoryTags[entityId] = tag
+    var current = root.historyByEntity[entityId] || {}
+    var keepPoints = current.hours === windowHours ? (current.points || []) : []
+    root.historyByEntity[entityId] = {
+      entityId: entityId,
+      hours: windowHours,
+      points: keepPoints,
+      loading: true,
+      error: ""
+    }
+    root.historyRevision++
+    var sent = root.send({
+      op: "history",
+      entity_id: entityId,
+      hours: windowHours,
+      tag: tag
+    })
+    if (!sent) {
+      delete root.pendingHistoryTags[entityId]
+      root.historyByEntity[entityId] = {
+        entityId: entityId,
+        hours: windowHours,
+        points: [],
+        loading: false,
+        error: "Not connected to Home Assistant."
+      }
+      root.historyRevision++
+      return false
+    }
+    return true
+  }
+
+  function handleHistory(event) {
+    var entityId = String(event.entity_id || "")
+    if (!EntityStore.validEntityId(entityId)) return
+    var tag = String(event.tag || "")
+    var pendingTag = root.pendingHistoryTags[entityId] || ""
+    if (pendingTag && tag && tag !== pendingTag) return
+    delete root.pendingHistoryTags[entityId]
+    var hours = Model.normalizeHistoryHours(event.hours)
+    var current = root.historyByEntity[entityId]
+    if (current && hours && current.hours && hours !== current.hours) return
+    var windowHours = hours || (current && current.hours) || 1
+    var points = root.sanitizeHistoryPoints(event.points)
+    var axisEnd = Number(event.end_time)
+    if (!isFinite(axisEnd)) axisEnd = Model.historyAxisEnd(
+      points, windowHours, Date.now() / 1000)
+    root.historyByEntity[entityId] = {
+      entityId: entityId,
+      hours: windowHours,
+      points: Model.clampHistoryPoints(
+        points,
+        windowHours, axisEnd, Model.HISTORY_MAX_POINTS),
+      axisEnd: axisEnd,
+      loading: false,
+      error: ""
+    }
+    root.historyRevision++
+  }
+
+  function appendHistoryPoint(entity) {
+    if (!entity || !EntityStore.validEntityId(entity.entity_id)) return
+    var entityId = entity.entity_id
+    var entry = root.historyByEntity[entityId]
+    if (!entry || entry.loading) return
+    var value = Model.parseNumericState(entity.state)
+    var hours = entry.hours || 1
+    var stamp = Date.parse(String(entity.last_updated || entity.last_changed || ""))
+    var now = isFinite(stamp) ? stamp / 1000 : entry.axisEnd || Date.now() / 1000
+    var existing = entry.points || []
+    var points = existing.slice()
+    points.push({ t: now, v: value })
+    root.historyByEntity[entityId] = {
+      entityId: entityId,
+      hours: hours,
+      points: Model.clampHistoryPoints(
+        points, hours, now, Model.HISTORY_MAX_POINTS),
+      axisEnd: now,
+      loading: false,
+      error: entry.error || ""
+    }
+    root.historyRevision++
+  }
+
   // ------------------------------------------------------------ actions
 
   // entity_id -> { desired, deadline }. The row flips at once and waits for
@@ -680,6 +844,30 @@ QtObject {
   }
 
   signal commandFailed(string tag)
+  signal historyReady(string tag, var histories, string error,
+                      real startMs, real endMs)
+  property int historySequence: 0
+
+  function requestHistoryBatch(entityIds, hours) {
+    if (!Array.isArray(entityIds) || entityIds.length === 0) return ""
+    var unique = []
+    for (var i = 0; i < entityIds.length && unique.length < 8; i++) {
+      var entityId = String(entityIds[i] || "")
+      if (!entityId || !root.states[entityId] || unique.indexOf(entityId) !== -1) continue
+      unique.push(entityId)
+    }
+    if (!unique.length) return ""
+    var span = Model.normalizeHistoryHours(hours)
+    if (!span) return ""
+    root.historySequence++
+    var tag = "history:" + root.connectionGeneration + ":" + root.historySequence
+    return root.send({
+      op: "history",
+      tag: tag,
+      entity_ids: unique,
+      hours: span
+    }) ? tag : ""
+  }
 
   // Returns the tag to match a later failure against, or "" if nothing went out.
   function callTagged(domain, service, entityId, data) {
@@ -908,6 +1096,14 @@ QtObject {
     case "result":
       root.handleResult(event)
       break
+    case "history":
+      if (event.histories !== undefined)
+        root.historyReady(String(event.tag || ""), event.histories || {},
+                          String(event.error || ""),
+                          Number(event.start_ms || 0), Number(event.end_ms || 0))
+      else
+        root.handleHistory(event)
+      break
     case "log":
       if (event.level === "warn") console.warn("hass-bridge: " + event.msg)
       break
@@ -915,9 +1111,31 @@ QtObject {
   }
 
   function handleResult(event) {
+    var tag = String(event.tag || "")
+    var historyEntityId = ""
+    for (var entityId in root.pendingHistoryTags) {
+      if (root.pendingHistoryTags[entityId] === tag) {
+        historyEntityId = entityId
+        break
+      }
+    }
+    if (historyEntityId) {
+      delete root.pendingHistoryTags[historyEntityId]
+      if (event.ok !== true) {
+        var current = root.historyByEntity[historyEntityId] || {}
+        root.historyByEntity[historyEntityId] = {
+          entityId: historyEntityId,
+          hours: current.hours || 1,
+          points: current.points || [],
+          loading: false,
+          error: event.error || "History request failed."
+        }
+        root.historyRevision++
+      }
+    }
+
     if (event.ok === true) return
 
-    var tag = String(event.tag || "")
     if (tag.indexOf("toggle:") === 0) {
       // Drop the guess now rather than at the sweep timer. On success it
       // stays: the confirming state_changed is already on its way.
@@ -947,6 +1165,7 @@ QtObject {
     root.states = EntityStore.upsertState(root.states, entity)
     root.stateRevision++
     root.clearPendingToggle(entity.entity_id)
+    root.appendHistoryPoint(entity)
     if (isNew) {
       root.rebuildSortedIds()
       root.rebuildRows()
@@ -993,6 +1212,7 @@ QtObject {
       event.areas, event.entities, event.devices)
     root.areaNames = projection.areaNames
     root.entityArea = projection.entityArea
+    root.entityDevice = projection.entityDevice
     root.savedFavoriteColors = projection.favoriteColors
     root.deviceNames = projection.deviceNames
     root.deviceInfo = projection.deviceInfo
@@ -1038,7 +1258,10 @@ QtObject {
         name: root.displayName(entityId),
         icon: root.iconFor(entityId, entity),
         state: Model.displayState(entity),
-        favorite: root.isFavorite(entityId)
+        favorite: root.isFavorite(entityId),
+        roomReading: false,
+        pinnable: Model.isExpandable(entity),
+        pinned: root.isEntityPinned(entityId)
       })
     }
     return out
@@ -1066,6 +1289,12 @@ QtObject {
       return a.order === b.order ? a.label.localeCompare(b.label) : a.order - b.order
     })
     return readings
+  }
+
+  function barDataReadingsForEntity(entityId) {
+    var deviceId = root.entityDevice[entityId]
+    return Model.barDataReadings(root.states[entityId], root.temperatureUnit,
+                                 deviceId ? root.deviceInfo[deviceId] : null)
   }
 
   function deviceDisplayName(deviceId, entityIds) {
@@ -1137,6 +1366,7 @@ QtObject {
           + (card.controlEntityId ? " · on/off" : ""),
         favorite: root.isRoomReading(deviceId),
         roomReading: true,
+        pinnable: true,
         pinned: root.isRoomReadingPinned(deviceId)
       })
     }
@@ -1159,6 +1389,7 @@ QtObject {
           state: card.readings.length + " readings",
           available: card.available,
           roomReading: true,
+          pinnable: true,
           pinned: root.isRoomReadingPinned(deviceId)
         }
       }
@@ -1171,7 +1402,8 @@ QtObject {
         state: entity ? Model.displayState(entity) : "Unavailable",
         available: entity !== undefined,
         roomReading: false,
-        pinned: false
+        pinnable: entity !== undefined && Model.isExpandable(entity),
+        pinned: root.isEntityPinned(itemId)
       }
     })
   }

@@ -115,6 +115,111 @@ for path in QML_FILES:
         check("fontFamily" in block,
               "%s:%d PanelActionButton without fontFamily" % (rel(path), line))
 
+print("sensor rows and bar popups share one history renderer")
+sensor_controls = open(os.path.join(ROOT, "controls", "SensorControls.qml"),
+                       encoding="utf-8").read()
+bar_graph = open(os.path.join(ROOT, "HistoryGraph.qml"), encoding="utf-8").read()
+shared_plot = open(os.path.join(ROOT, "HistoryPlot.qml"), encoding="utf-8").read()
+check("HistoryPlot {" in sensor_controls and "Canvas {" not in sensor_controls,
+      "expanded sensor controls bypass HistoryPlot")
+check("HistoryPlot {" in bar_graph and "Canvas {" not in bar_graph,
+      "bar history graphs bypass HistoryPlot")
+check("Canvas {" in shared_plot,
+      "HistoryPlot has no shared renderer")
+
+print("bar actions reserve geometry and follow layout revisions")
+entity_row = open(os.path.join(ROOT, "EntityRow.qml"), encoding="utf-8").read()
+room_card = open(os.path.join(ROOT, "RoomReadingsCard.qml"), encoding="utf-8").read()
+check("barConfigSerial" in entity_row and "barConfigRevision" in entity_row,
+      "entity bar state does not track the live layout revision")
+check("barConfigSerial" in room_card and "barConfigRevision" in room_card,
+      "room bar state does not track the live layout revision")
+check("id: roomBarSlot" in room_card and "panelActionsVisible" in room_card,
+      "room bar action has no permanent geometry slot")
+check(entity_row.index("id: glyph")
+      < entity_row.index("id: labels")
+      < entity_row.index("id: entityPrimarySlot")
+      < entity_row.index("id: entityBarSlot")
+      < entity_row.index("id: entityExpandSlot"),
+      "entity controls are not pin, name, primary, bar, chevron")
+check(room_card.index("id: glyph")
+      < room_card.index("id: headerLabels")
+      < room_card.index("id: roomPrimarySlot")
+      < room_card.index("id: roomBarSlot")
+      < room_card.index("id: roomExpandSlot"),
+      "room controls are not pin, name, primary, bar, chevron")
+check("id: glyph" in entity_row
+      and "onClicked: row.hass.toggleEntityPinned" in entity_row
+      and "Style.selectedFillFor(row.fg, Color.accent)" in entity_row,
+      "entity icon is not the selected pin button")
+check("id: glyph" in room_card
+      and "onClicked: card.pinRequested()" in room_card
+      and "Style.selectedFillFor(card.fg, Color.accent)" in room_card,
+      "room icon is not the selected pin button")
+check("readonly property bool panelActionsVisible" in entity_row
+      and "visible: row.barDataEligible && row.panelActionsVisible" in entity_row
+      and "rowHover.hovered" in entity_row
+      and "barActionHovered" not in entity_row,
+      "entity bar action is not absent outside full-row hover")
+check("readonly property bool panelActionsVisible" in room_card
+      and "&& card.panelActionsVisible" in room_card
+      and "card.rowHovered" in room_card
+      and "rowHovered: rowHover.hovered" in entity_row
+      and "cardHover" not in room_card
+      and "barActionHovered" not in room_card,
+      "room bar action is not absent outside full-card hover")
+check("&& rowHover.hovered" in entity_row
+      and "&& row.hass.showPanelPinOnHover" in entity_row
+      and 'text: row.icon' in entity_row
+      and "opacity: row.pinPreview ? 0.0 : 1.0" in entity_row
+      and "visible: row.showIcon && row.pinPreview" in entity_row,
+      "entity icon does not temporarily morph into a pin on full-row hover")
+entity_glyph = next(block for _, block in blocks(entity_row, "Text")
+                    if "id: glyph" in block)
+check("width: row.showIcon ? implicitWidth : 0" in entity_glyph
+      and "horizontalAlignment:" not in entity_glyph,
+      "ordinary entity pinning still reserves a fixed icon slot")
+check("readonly property bool pinPreview: card.showPanelPinOnHover" in room_card
+      and "&& card.showIcon && card.rowHovered" in room_card
+      and "rowHovered: rowHover.hovered" in entity_row
+      and 'text: card.cardData.icon' in room_card
+      and "opacity: card.pinPreview ? 0.0 : 1.0" in room_card,
+      "room icon does not temporarily morph into a pin on full-card hover")
+check("anchors.left: entityPrimarySlot.right" in entity_row
+      and "anchors.right: entityExpandSlot.left" in entity_row
+      and "id: entityExpandSlot\n          anchors.right: parent.right" in entity_row,
+      "entity bar action is not centered between primary and chevron slots")
+check("anchors.left: roomPrimarySlot.right" in room_card
+      and "anchors.right: roomExpandSlot.left" in room_card
+      and "id: roomExpandSlot\n        anchors.right: parent.right" in room_card,
+      "room bar action is not centered between primary and chevron slots")
+check(entity_row.count("TextMetrics {") >= 2
+      and "readonly property real chevronInkLeft" in entity_row
+      and "readonly property real barInkTarget" in entity_row
+      and "entityBarMetrics.tightBoundingRect" in entity_row,
+      "entity action centering does not measure rendered glyph ink")
+check(room_card.count("TextMetrics {") >= 2
+      and "readonly property real chevronInkLeft" in room_card
+      and "readonly property real barInkTarget" in room_card
+      and "roomBarMetrics.tightBoundingRect" in room_card,
+      "room action centering does not measure rendered glyph ink")
+check("foreground: row.barInBar ? Color.accent : row.fg" in entity_row,
+      "entity remove action does not use the theme accent")
+check("foreground: roomBarSlot.added ? Color.accent : card.fg" in room_card
+      and "foreground: metric.added ? Color.accent : metric.qualityColor" in room_card,
+      "room remove actions do not use the theme accent")
+check("Row {\n        id: controlSlot" not in entity_row
+      and "Row {\n      id: headerActions" not in room_card,
+      "action slots still depend on a positioner")
+
+panel = open(os.path.join(ROOT, "Panel.qml"), encoding="utf-8").read()
+check("hass.isEntityPinned(entityId)" in panel
+      and "expanded, pinned" in panel,
+      "ordinary entity pins do not extend the room expansion default")
+check("enabled: row.expandable && !row.pinned" not in entity_row
+      and 'tooltipText: row.pinned ? "Pinned open"' not in entity_row,
+      "an ordinary entity pin still disables manual collapse")
+
 print()
 panel = open(os.path.join(ROOT, "Panel.qml"), encoding="utf-8").read()
 entity_row = open(os.path.join(ROOT, "EntityRow.qml"), encoding="utf-8").read()
@@ -130,6 +235,7 @@ check("property var collapsedPinnedRows: []" in panel
 expand_cursor = panel[panel.index("function expandCursor()"):
                       panel.index("// Colour carries the state")]
 check("toggleRowExpansion(" in expand_cursor
+      and "item.expanded, item.pinned" in expand_cursor
       and "expandedEntityId =" not in expand_cursor,
       "keyboard expansion bypasses the shared pinned-row transition")
 
@@ -155,10 +261,14 @@ check('text: card.cardData.icon' in room_glyph
 check("onClicked: card.pinRequested()" in room_card
       and "onPinRequested: row.hass.toggleRoomReadingPinned" in entity_row,
       "the panel room pin is not interactive")
-pin_mouse = next(block for _, block in blocks(room_card, "MouseArea")
-                 if "id: glyphPinMouse" in block)
-check("enabled: card.showPanelPinOnHover && card.showIcon" in pin_mouse,
+room_pin_mouse = next(block for _, block in blocks(room_card, "MouseArea")
+                      if "id: glyphPinMouse" in block)
+check("enabled: card.showPanelPinOnHover && card.showIcon" in room_pin_mouse,
       "a disabled room pin shortcut still leaves an interactive panel target")
+entity_pin_mouse = next(block for _, block in blocks(entity_row, "MouseArea")
+                        if "id: glyphPinMouse" in block)
+check("&& row.hass.showPanelPinOnHover" in entity_pin_mouse,
+      "a disabled entity pin shortcut still leaves an interactive panel target")
 check("property bool showPanelPinOnHover: false" in service
       and "function setShowPanelPinOnHover(enabled)" in service
       and 'label: "Show pin shortcut on hover"' in settings
@@ -184,8 +294,8 @@ check("bordered:" not in pin_block
       "the settings pin uses geometry instead of colour to show saved state")
 check("pinned: modelData.pinned" in settings,
       "the Devices list does not project saved room pin state")
-check("pinnable: modelData.roomReading === true" in settings,
-      "the Devices list does not identify pinnable room rows")
+check(settings.count("pinnable: modelData.pinnable === true") == 2,
+      "the Devices lists do not project pinnability for every row kind")
 
 print()
 if failures:

@@ -52,21 +52,25 @@ const registries = Store.projectRegistries(
   [{ area_id: "k", name: "Kitchen" }, { area_id: "h", name: "Hall" }],
   [{ entity_id: "light.a", device_id: "d1" },
    { entity_id: "sensor.b", device_id: "d2", area_id: "h" }],
-  [{ id: "d1", area_id: "k", name: "Lamp" },
-   { id: "d2", area_id: "k", name_by_user: "Bedroom air" }]
+  [{ id: "d1", area_id: "k", name: "Lamp",
+     manufacturer: "Acme", model: "Light 1" },
+   { id: "d2", area_id: "k", name_by_user: "Bedroom air",
+     manufacturer: "IKEA of Sweden", model: "VINDSTYRKA" }]
 );
 eq("area names are projected", registries.areaNames, { k: "Kitchen", h: "Hall" });
 eq("entity area wins over its device",
    registries.entityArea, { "light.a": "k", "sensor.b": "h" });
 eq("device names and entity membership are projected",
    [registries.deviceNames, registries.deviceInfo,
-    registries.deviceEntities, registries.entityRegistry],
+    registries.deviceEntities, registries.entityRegistry,
+    registries.entityDevice],
    [{ d1: "Lamp", d2: "Bedroom air" },
-    { d1: { manufacturer: "", model: "" },
-      d2: { manufacturer: "", model: "" } },
+    { d1: { manufacturer: "Acme", model: "Light 1" },
+      d2: { manufacturer: "IKEA of Sweden", model: "VINDSTYRKA" } },
     { d1: ["light.a"], d2: ["sensor.b"] },
     { "light.a": { entityCategory: "", name: "", originalName: "" },
-      "sensor.b": { entityCategory: "", name: "", originalName: "" } }]);
+      "sensor.b": { entityCategory: "", name: "", originalName: "" } },
+    { "light.a": "d1", "sensor.b": "d2" }]);
 eq("device membership is stored in a prototype-free map",
    Object.getPrototypeOf(registries.deviceEntities), null);
 

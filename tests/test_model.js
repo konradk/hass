@@ -138,17 +138,27 @@ section("room-reading classification", () => {
   eq("VOC index fallback recognizes an unambiguous unitless name",
      Model.environmentalReading(entity("sensor.air_voc_index", "250")).kind,
      "voc_index");
-  const ikea = { manufacturer: "IKEA of Sweden", model: "VINDSTYRKA E2112" };
-  eq("VINDSTYRKA uses the Sensirion VOC index bands",
-     Model.environmentalReading(
-       entity("sensor.air_voc_index", "251"), ikea).quality, "poor");
-  eq("VINDSTYRKA VOC index keeps all four documented levels",
-     [150, 151, 251, 401].map((value) => Model.environmentalReading(
-       entity("sensor.air_voc_index", String(value)), ikea).quality),
-     ["good", "moderate", "poor", "critical"]);
-  eq("another vendor's unitless VOC index stays neutral",
-     Model.environmentalReading(entity("sensor.air_voc_index", "251"), {
-       manufacturer: "Other", model: "Monitor"
+  const voc = (value) => entity("sensor.air_voc_index", String(value));
+  const vindstyrka = {
+    manufacturer: "IKEA of Sweden",
+    model: "VINDSTYRKA air quality and humidity sensor"
+  };
+  [[150, "good"], [151, "moderate"], [250, "moderate"],
+   [251, "poor"], [400, "poor"], [401, "critical"]].forEach(([value, quality]) => {
+    eq(`IKEA VOC index ${value} is ${quality}`,
+       Model.environmentalReading(voc(value), vindstyrka).quality, quality);
+  });
+  eq("IKEA's E2112 model number is recognized",
+     Model.environmentalReading(voc(251), {
+       manufacturer: "IKEA", model: "E2112"
+     }).quality, "poor");
+  eq("a generic VOC index does not inherit IKEA bands",
+     Model.environmentalReading(voc(401), {
+       manufacturer: "Other", model: "VINDSTYRKA"
+     }).quality, "neutral");
+  eq("another IKEA device does not inherit VINDSTYRKA bands",
+     Model.environmentalReading(voc(401), {
+       manufacturer: "IKEA", model: "STARKVIND"
      }).quality, "neutral");
   eq("battery is not treated as a room reading",
      Model.environmentalReading(entity("sensor.air_battery", "100", {
@@ -257,6 +267,32 @@ section("room-reading classification", () => {
        { kind: "voc", label: "VOC", value: "12 ppb" },
        { kind: "pm25", label: "PM2.5", value: "4 µg/m³" }
      ], 3), "24.7 °C · 46.9 % · CO₂ 407 ppm · +2");
+});
+
+section("bar data readings", () => {
+  const climate = entity("climate.office", "cool", {
+    current_temperature: 25, temperature: 25.5
+  });
+  eq("climate is eligible for a bar reading",
+     Model.barDataEligible(climate), true);
+  eq("lights are not data widgets",
+     Model.barDataEligible(entity("light.office", "on")), false);
+  eq("AC shows current and target temperatures",
+     Model.barDataReadings(climate, "°C"), [
+       { entityId: "climate.office", kind: "climate_current", label: "Current",
+         value: "25°C", quality: "neutral", order: 10 },
+       { entityId: "climate.office", kind: "climate_target", label: "Target",
+         value: "→ 25.5°C", quality: "neutral", order: 20 }
+     ]);
+  eq("an unavailable AC remains removable and identifiable",
+     Model.barDataReadings(entity("climate.office", "unavailable"), "°C"), [
+       { entityId: "climate.office", kind: "climate_state", label: "AC",
+         value: "Unavailable", quality: "unknown", order: 10 }
+     ]);
+  eq("an individual VINDSTYRKA VOC widget uses the device bands",
+     Model.barDataReadings(entity("sensor.air_voc_index", "151"), "", {
+       manufacturer: "IKEA of Sweden", model: "VINDSTYRKA"
+     })[0].quality, "moderate");
 });
 
 section("brightness", () => {
@@ -487,6 +523,66 @@ section("control classification", () => {
   eq("scene is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
   eq("script is one-shot", Model.controlKind(entity("script.a", "off")), "activate");
   eq("sensor has no control", Model.controlKind(entity("sensor.a", "5")), "none");
+  eq("a numeric sensor is graphable",
+     Model.hasHistoryGraph(entity("sensor.a", "22.3")), true);
+  eq("a blank numeric parse is rejected",
+     Model.parseNumericState("  "), null);
+  eq("text sensors are not graphable",
+     Model.hasHistoryGraph(entity("sensor.weather", "sunny")), false);
+  eq("binary sensors are not graphable",
+     Model.hasHistoryGraph(entity("binary_sensor.a", "on")), false);
+  eq("history windows are 1, 3, 6, 12 or 24 hours",
+     [Model.normalizeHistoryHours(1), Model.normalizeHistoryHours(3),
+      Model.normalizeHistoryHours(6), Model.normalizeHistoryHours(12),
+      Model.normalizeHistoryHours(24), Model.normalizeHistoryHours(2),
+      Model.normalizeHistoryHours("3"), Model.normalizeHistoryHours(null)],
+     [1, 3, 6, 12, 24, 0, 3, 0]);
+  eq("a day window is labelled 1d", Model.historyWindowLabel(24), "1d");
+  eq("an hour window keeps an h suffix", Model.historyWindowLabel(12), "12h");
+  eq("history axis follows a server clock ahead of the desktop",
+     Model.historyAxisEnd([{t: 110, v: 2}], 1, 100), 110);
+  eq("history axis follows a server clock beyond the local window",
+     Model.historyAxisEnd([{t: 100, v: 2}], 1, 4000), 100);
+  eq("history axis otherwise advances to local now",
+     Model.historyAxisEnd([{t: 90, v: 2}], 1, 100), 100);
+  eq("hover uses the last known sample at the cursor time",
+     Model.nearestHistoryIndex(
+       [{ t: 10, v: 1 }, { t: 20, v: 2 }, { t: 30, v: 3 }],
+       75, 0, 100, 10, 30),
+     1);
+  eq("hover after the last sample keeps the last value",
+     Model.nearestHistoryIndex(
+       [{ t: 10, v: 1 }, { t: 20, v: 2 }],
+       100, 0, 100, 10, 40),
+     1);
+  eq("an empty series has no hover sample",
+     Model.nearestHistoryIndex([], 10, 0, 100, 0, 1), -1);
+  eq("history points outside the window are dropped",
+     Model.clampHistoryPoints(
+       [{ t: -100, v: 1 }, { t: 3500, v: 2 }, { t: 3700, v: 3 }],
+       1, 3600, 240),
+     [{ t: 3500, v: 2 }, { t: 3700, v: 3 }]);
+  eq("a client clock ahead of Home Assistant still keeps samples",
+     Model.clampHistoryPoints(
+       [{ t: 1000, v: 1 }, { t: 2000, v: 2 }, { t: 3000, v: 3 }],
+       1, 10000, 240),
+     [{ t: 1000, v: 1 }, { t: 2000, v: 2 }, { t: 3000, v: 3 }]);
+  eq("unavailable history remains a gap",
+     Model.clampHistoryPoints(
+       [{ t: 1000, v: 1 }, { t: 1500, v: null }, { t: 2000, v: 2 }],
+       1, 2000, 240),
+     [{ t: 1000, v: 1 }, { t: 1500, v: null }, { t: 2000, v: 2 }]);
+  const dense = [];
+  for (let i = 0; i < 500; i++) dense.push({ t: 1000 + i, v: i });
+  eq("history points are capped",
+     Model.clampHistoryPoints(dense, 1, 2000, 240).length <= 240, true);
+  const peaked = [];
+  for (let i = 0; i < 500; i++) peaked.push({ t: 1000 + i, v: i === 250 ? 999 : 10 });
+  eq("min max sampling retains a brief peak",
+     Math.max(...Model.downsampleHistoryPoints(peaked, 40).map((point) => point.v)),
+     999);
+  eq("history max points matches the bridge ceiling",
+     Model.HISTORY_MAX_POINTS, 240);
 
   eq("a dimmable light expands",
      Model.isExpandable(entity("light.a", "on",
@@ -509,7 +605,12 @@ section("control classification", () => {
   eq("cover with only position support still expands",
      Model.isExpandable(entity("cover.a", "open",
        { supported_features: 4, current_position: 50 })), true);
-  eq("sensor does not", Model.isExpandable(entity("sensor.a", "5")), false);
+  eq("a numeric sensor expands onto a graph",
+     Model.isExpandable(entity("sensor.a", "5")), true);
+  eq("an unavailable numeric sensor does not expand",
+     Model.isExpandable(entity("sensor.a", "unavailable")), false);
+  eq("a text sensor does not expand",
+     Model.isExpandable(entity("sensor.weather", "sunny")), false);
   // Every expandable domain must have a control to expand into; EntityRow maps
   // them by hand, and a camera has none.
   eq("camera does not expand onto an empty panel",
@@ -593,6 +694,14 @@ section("entity capabilities", () => {
   eq("unavailable controls are disabled", unavailable.expandable, false);
   eq("scenes remain activatable despite unknown state",
      Model.capabilitiesFor(entity("scene.a", "unknown")).activate, true);
+
+  const numericSensor = Model.capabilitiesFor(entity("sensor.a", "22.3", {
+    unit_of_measurement: "°C"
+  }));
+  eq("a numeric sensor advertises a history graph",
+     numericSensor.historyGraph, true);
+  eq("a numeric sensor reserves the expand slot",
+     numericSensor.reserveExpandSlot, true);
 });
 
 section("service calls", () => {

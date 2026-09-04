@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fake_ha import FakeHA  # noqa: E402
@@ -130,6 +131,64 @@ def test_live_happy_path():
               call.get("target", {}).get("entity_id") == "light.test", call)
         check("passes service data",
               call.get("service_data", {}).get("brightness_pct") == 40, call)
+
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-1"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-1")
+        check("returns history for a sensor",
+              history is not None and history.get("hours") == 1
+              and history.get("entity_id") == "sensor.kitchen_temperature",
+              history)
+        check("history events carry a generation",
+              history is not None and isinstance(history.get("generation"), int),
+              history)
+        points = history.get("points") if history else None
+        check("history points contain numeric samples and explicit gaps",
+              isinstance(points, list) and len(points) >= 1
+              and all(isinstance(p.get("t"), (int, float))
+                      and (p.get("v") is None
+                           or isinstance(p.get("v"), (int, float)))
+                      and set(p) == {"t", "v"} for p in points),
+              points)
+        dumped = json.dumps(history) if history else ""
+        check("history output has no Home Assistant attributes",
+              "access_token" not in dumped and "friendly_name" not in dumped
+              and '"a"' not in dumped, dumped)
+        request = server.history_requests[0] if server.history_requests else {}
+        check("asks Home Assistant for a bounded period",
+              request.get("type") == "history/history_during_period"
+              and request.get("no_attributes") is True
+              and request.get("minimal_response") is True
+              and request.get("entity_ids") == ["sensor.kitchen_temperature"],
+              request)
+
+        before_bad = len(bridge.snapshot())
+        bridge.send({"op": "history", "entity_id": "light.test", "hours": 1,
+                     "tag": "hist-bad-id"})
+        bad_id = bridge.wait_for(
+            lambda e: e["ev"] == "result" and e.get("tag") == "hist-bad-id",
+            after=before_bad)
+        check("rejects a non-sensor history id",
+              bad_id is not None and bad_id.get("ok") is False, bad_id)
+
+        before_hours = len(bridge.snapshot())
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 2, "tag": "hist-bad-hours"})
+        bad_hours = bridge.wait_for(
+            lambda e: e["ev"] == "result" and e.get("tag") == "hist-bad-hours",
+            after=before_hours)
+        check("rejects an unsupported history window",
+              bad_hours is not None and bad_hours.get("ok") is False, bad_hours)
+
+        before_day = len(bridge.snapshot())
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 24, "tag": "hist-1d"})
+        day = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-1d",
+            after=before_day)
+        check("accepts a 1d history window",
+              day is not None and day.get("hours") == 24, day)
     finally:
         bridge.stop()
         server.stop()
@@ -152,6 +211,88 @@ def test_rejected_service_call_is_reported():
         check("reports the failure", result is not None and not result["ok"], result)
         check("keeps the server's reason",
               result is not None and "Not allowed" in result.get("error", ""), result)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_history_is_normalized():
+    print("history: numeric samples are bounded and normalized for QML")
+    server = FakeHA()
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({
+            "op": "history", "tag": "history:test",
+            "entity_ids": ["sensor.air_temperature"],
+            "start_time": "2026-08-27T10:00:00.000Z",
+            "end_time": "2026-08-27T14:00:00.000Z",
+        })
+        event = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "history:test")
+        sparse = (event or {}).get("histories", {}).get(
+            "sensor.air_temperature", [])
+        check("returns a step timeline with an unavailable gap",
+              len(sparse) >= 5
+              and sparse[0]["v"] == 20.5
+              and sparse[-1]["v"] == 21.25
+              and any(point["v"] is None for point in sparse),
+              {"count": len(sparse),
+               "first": sparse[0] if sparse else None,
+               "last": sparse[-1] if sparse else None})
+        request = server.history_requests[0] if server.history_requests else {}
+        check("uses Home Assistant's websocket history command",
+              request.get("type") == "history/history_during_period", request)
+        check("requests the compact no attribute response",
+              request.get("minimal_response") is True
+              and request.get("no_attributes") is True, request)
+
+        bridge.send({
+            "op": "history", "tag": "history:dense",
+            "entity_ids": ["sensor.dense_power"],
+            "start_time": "2026-08-27T10:00:00.000Z",
+            "end_time": "2026-08-27T14:00:00.000Z",
+        })
+        dense_event = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "history:dense")
+        dense = (dense_event or {}).get("histories", {}).get("sensor.dense_power", [])
+        check("min max sampling preserves both extrema and quiet states",
+              len(dense) <= 360
+              and any(point["v"] == 0 for point in dense)
+              and max(point["v"] for point in dense if point["v"] is not None) == 129,
+              {"count": len(dense),
+               "zeros": sum(1 for point in dense if point["v"] == 0),
+               "maximum": max(point["v"] for point in dense
+                              if point["v"] is not None)})
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_history_uses_home_assistant_clock():
+    print("history: requested windows follow Home Assistant's clock")
+    server = FakeHA(server_time_offset=7200)
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        local_now = time.time()
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-server-clock"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history"
+            and e.get("tag") == "hist-server-clock")
+        request = server.history_requests[0] if server.history_requests else {}
+        requested_end = datetime.fromisoformat(
+            str(request.get("end_time", "")).replace("Z", "+00:00")).timestamp()
+        check("recorder end time uses the handshake Date header",
+              abs(requested_end - (local_now + 7200)) < 5,
+              {"requested": requested_end, "expected": local_now + 7200})
+        check("the server anchored axis is returned to QML",
+              history is not None
+              and abs(history.get("end_time", 0) - requested_end) < 0.01,
+              history)
     finally:
         bridge.stop()
         server.stop()
@@ -911,13 +1052,98 @@ def test_demo_needs_no_server():
             and e["entity"]["entity_id"].startswith("climate."),
             budget=12, after=drift_after)
         check("emits unprompted events", drift is not None)
+
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "demo-history"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "demo-history")
+        check("demo history returns numeric points",
+              history is not None and isinstance(history.get("points"), list)
+              and len(history["points"]) > 1
+              and all("t" in point and "v" in point for point in history["points"]),
+              history)
+        check("demo history never includes attributes",
+              history is not None and "a" not in json.dumps(history.get("points")),
+              history)
     finally:
         bridge.stop()
+
+
+def test_history_is_downsampled():
+    print("history: oversized recorder payloads are downsampled")
+    server = FakeHA()
+    server.history_point_count = 800
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 6, "tag": "hist-dense"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-dense")
+        points = history.get("points") if history else []
+        check("caps history at 240 points",
+              2 <= len(points) <= 240, len(points) if history else None)
+        check("keeps chronological samples and explicit gaps",
+              points == sorted(points, key=lambda p: p["t"])
+              and all(set(p) == {"t", "v"}
+                      and (p["v"] is None or isinstance(p["v"], (int, float)))
+                      for p in points),
+              points[:3] if points else points)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_history_uses_a_longer_timeout():
+    print("history: recorder requests get more than the ordinary 5s budget")
+    # 7s is past REQUEST_TIMEOUT but inside HISTORY_REQUEST_TIMEOUT.
+    server = FakeHA(delays={"history/history_during_period": 7.0})
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-slow"})
+        history = bridge.wait_for(
+            lambda e: e["ev"] == "history" and e.get("tag") == "hist-slow",
+            budget=15.0)
+        check("a slow history reply still succeeds",
+              history is not None and isinstance(history.get("points"), list),
+              history)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_history_timeout_is_reported():
+    print("history: an overdue recorder reply is reported as a failed command")
+    server = FakeHA(delays={"history/history_during_period": 22.0})
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "history", "entity_id": "sensor.kitchen_temperature",
+                     "hours": 1, "tag": "hist-overdue"})
+        refused = bridge.wait_for(
+            lambda e: e["ev"] == "result" and e.get("tag") == "hist-overdue",
+            budget=28.0)
+        check("reports the overdue history request",
+              refused is not None and refused.get("ok") is False, refused)
+        check("keeps a timeout reason",
+              refused is not None
+              and "did not answer" in refused.get("error", "").lower(),
+              refused)
+    finally:
+        bridge.stop()
+        server.stop()
 
 
 def main():
     for test in (test_live_happy_path,
                  test_rejected_service_call_is_reported,
+                 test_history_is_normalized,
+                 test_history_uses_home_assistant_clock,
                  test_reports_the_unit_system,
                  test_auth_invalid_once_is_retried,
                  test_auth_invalid_twice_stops,
@@ -948,7 +1174,10 @@ def main():
                  test_local_url_is_skipped_off_the_trusted_network,
                  test_local_url_without_a_trusted_network_is_never_used,
                  test_unknown_wifi_state_fails_closed,
-                 test_demo_needs_no_server):
+                 test_demo_needs_no_server,
+                 test_history_is_downsampled,
+                 test_history_uses_a_longer_timeout,
+                 test_history_timeout_is_reported):
         test()
         print()
 

@@ -48,8 +48,10 @@ Panel {
   }
 
   function pinnedExpansionVisible(rowKind, entityId, roomDeviceId) {
-    var pinned = rowKind === "room_reading" && serviceReady
-      && hass.isRoomReadingPinned(roomDeviceId)
+    if (!serviceReady) return false
+    var pinned = rowKind === "room_reading"
+      ? hass.isRoomReadingPinned(roomDeviceId)
+      : hass.isEntityPinned(entityId)
     return PanelState.pinnedVisible(
       pinned, collapsedPinnedRows,
       expansionKey(rowKind, entityId, roomDeviceId))
@@ -163,7 +165,7 @@ Panel {
     var item = currentRow()
     if (!item || !item.expandable) return
     root.toggleRowExpansion(item.rowKind, item.entityId, item.roomDeviceId,
-                            item.expanded, item.roomPinned)
+                            item.expanded, item.pinned)
   }
 
   // Colour carries the state, so the button never changes width.
@@ -542,7 +544,7 @@ Panel {
                 }
                 onExpandToggled: {
                   root.toggleRowExpansion(rowKind, entityId, roomDeviceId,
-                                          expanded, roomPinned)
+                                          expanded, pinned)
                 }
                 onExpandedControlCursorRequested: function(controlIndex) {
                   if (controlIndex < 0) return
