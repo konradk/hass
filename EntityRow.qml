@@ -65,13 +65,17 @@ CursorSurface {
   readonly property bool actionable: available
     && (control !== "none" || expandable)
 
+  // A button is one-shot like a scene, but you press it rather than run it.
+  readonly property bool pressable: row.domain === "button"
+    || row.domain === "input_button"
+
   readonly property string actionTooltip: {
     if (!actionable) return ""
     if (expandable) return row.expanded ? "Collapse" : "Show controls"
     switch (control) {
     case "toggle": return isOn ? "Turn off" : "Turn on"
     case "lock": return isOn ? "Unlock" : "Lock"
-    case "activate": return "Activate"
+    case "activate": return row.pressable ? "Press" : "Activate"
     default: return ""
     }
   }

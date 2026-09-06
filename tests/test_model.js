@@ -103,6 +103,11 @@ section("subtitles", () => {
      Model.isAvailable(entity("scene.a", "unknown")), true);
   eq("a script stays available too",
      Model.isAvailable(entity("script.a", "unknown")), true);
+  // A button's state is a press timestamp, and "unknown" until the first one.
+  eq("a never-pressed button stays available",
+     Model.isAvailable(entity("button.a", "unknown")), true);
+  eq("a pressed button stays available",
+     Model.isAvailable(entity("button.a", "2026-08-27T08:25:57+00:00")), true);
   eq("an unavailable light is not available",
      Model.isAvailable(entity("light.a", "unavailable")), false);
   eq("a missing entity is not available", Model.isAvailable(null), false);
@@ -115,6 +120,10 @@ section("subtitles", () => {
 section("badges", () => {
   eq("scene", Model.badgeText(entity("scene.a", "unknown")), "Scene");
   eq("camera", Model.badgeText(entity("camera.a", "streaming")), "Camera");
+  // Never the raw press timestamp, which is what the state actually holds.
+  eq("button", Model.badgeText(
+     entity("button.a", "2026-08-27T08:25:57+00:00")), "Button");
+  eq("input_button", Model.badgeText(entity("input_button.a", "unknown")), "Button");
   // hvac_action is what a real climate entity exposes; the mode is the state.
   eq("climate prefers hvac_action",
      Model.badgeText(entity("climate.a", "heat", { hvac_action: "idle" })), "Idle");
@@ -486,6 +495,10 @@ section("control classification", () => {
   eq("lock is its own kind", Model.controlKind(entity("lock.a", "locked")), "lock");
   eq("scene is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
   eq("script is one-shot", Model.controlKind(entity("script.a", "off")), "activate");
+  eq("button is one-shot",
+     Model.controlKind(entity("button.a", "2026-08-27T08:25:57+00:00")), "activate");
+  eq("input_button is one-shot",
+     Model.controlKind(entity("input_button.a", "unknown")), "activate");
   eq("sensor has no control", Model.controlKind(entity("sensor.a", "5")), "none");
 
   eq("a dimmable light expands",
@@ -593,6 +606,11 @@ section("entity capabilities", () => {
   eq("unavailable controls are disabled", unavailable.expandable, false);
   eq("scenes remain activatable despite unknown state",
      Model.capabilitiesFor(entity("scene.a", "unknown")).activate, true);
+  eq("buttons are activatable despite a timestamp state",
+     Model.capabilitiesFor(
+       entity("button.a", "2026-08-27T08:25:57+00:00")).activate, true);
+  eq("a button offers no toggle",
+     Model.capabilitiesFor(entity("button.a", "unknown")).toggle, false);
 });
 
 section("service calls", () => {
@@ -606,6 +624,22 @@ section("service calls", () => {
   eq("an off climate entity turns on through its own domain",
      Model.toggleCall(entity("climate.a", "off", { supported_features: 256 }), false),
      { domain: "climate", service: "turn_on" });
+  // A one-shot entity has no turn_on/turn_off pair to fall back on: the press
+  // domains only answer `press`, so guessing turn_on would fail silently.
+  eq("a scene is activated by turning it on",
+     Model.activateCall(entity("scene.a", "unknown")),
+     { domain: "scene", service: "turn_on" });
+  eq("a script is activated by turning it on",
+     Model.activateCall(entity("script.a", "off")),
+     { domain: "script", service: "turn_on" });
+  eq("a button is pressed",
+     Model.activateCall(entity("button.a", "unknown")),
+     { domain: "button", service: "press" });
+  eq("an input_button is pressed too",
+     Model.activateCall(entity("input_button.a", "unknown")),
+     { domain: "input_button", service: "press" });
+  eq("anything else has no one-shot call",
+     Model.activateCall(entity("light.a", "on")), null);
   // Anything outside the known list still gets a sensible attempt.
   eq("an unknown domain falls back",
      Model.toggleCall(entity("water_heater.a", "on"), true),

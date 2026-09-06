@@ -73,6 +73,22 @@ eq("off climate without a target keeps an expansion slot",
 eq("off climate without a target does not expose an empty expander",
    offClimateRow.expandable, false);
 
+// A button reports its last press as its state; the row still has to offer the
+// one-shot action rather than printing the timestamp as a badge.
+const button = {
+  entity_id: "button.front_door",
+  state: "2026-08-27T08:25:57.454573+00:00",
+  attributes: { friendly_name: "Front Door" }
+};
+const buttonRow = Rows.project(button.entity_id, button, {
+  name: "Front Door", icon: "B", isOn: false, pending: false,
+  temperatureUnit: "", entityArea: {}, areaNames: {}
+}, Model);
+eq("a button projects the one-shot control", buttonRow.control, "activate");
+eq("a button is available despite its timestamp state",
+   buttonRow.available, true);
+eq("a button badges its kind, not its press time", buttonRow.badge, "Button");
+
 const missing = Rows.project("light.missing", null, {
   name: "light.missing", icon: "?", isOn: false, pending: false,
   temperatureUnit: "", entityArea: {}, areaNames: {}
