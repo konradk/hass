@@ -100,6 +100,10 @@ The optional **Show pin shortcut on hover** toggle in **General** also exposes
 that action over the normal panel icon while a row is hovered. It is off by
 default.
 
+When **Group by area** adds more area tabs than fit across the panel, they
+scroll sideways. The optional **Wrap area tabs** toggle in **General** lets them
+flow onto multiple rows instead. It is off by default.
+
 Classification follows Home Assistant's documented
 [`SensorDeviceClass`](https://developers.home-assistant.io/docs/core/entity/sensor/)
 metadata first. A classless sensor is included only when both its entity name

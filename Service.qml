@@ -77,6 +77,7 @@ QtObject {
   property bool groupByArea: false
   property bool showEntityIcons: true
   property bool showPanelPinOnHover: false
+  property bool wrapAreaTabs: false
 
   // [{ id, title, entityIds }] — favorites, then areas, then "Other".
   property var tabs: [{ id: "favorites", title: "Favorites", entityIds: [] }]
@@ -124,6 +125,7 @@ QtObject {
       groupByArea: root.groupByArea,
       showEntityIcons: root.showEntityIcons,
       showPanelPinOnHover: root.showPanelPinOnHover,
+      wrapAreaTabs: root.wrapAreaTabs,
       selectedTab: root.activeTab,
       displayNameOverrides: root.displayNameOverrides,
       iconOverrides: root.iconOverrides
@@ -147,6 +149,11 @@ QtObject {
   function setShowPanelPinOnHover(enabled) {
     if (root.showPanelPinOnHover === enabled) return
     root.saveConfig({ showPanelPinOnHover: enabled })
+  }
+
+  function setWrapAreaTabs(enabled) {
+    if (root.wrapAreaTabs === enabled) return
+    root.saveConfig({ wrapAreaTabs: enabled })
   }
 
   // FileView will not create a missing parent directory, and starting the
@@ -422,6 +429,7 @@ QtObject {
     root.groupByArea = config.groupByArea
     root.showEntityIcons = config.showEntityIcons
     root.showPanelPinOnHover = config.showPanelPinOnHover
+    root.wrapAreaTabs = config.wrapAreaTabs
     root.activeTab = config.selectedTab
 
     root.configured = root.demoMode || root.baseUrl.length > 0

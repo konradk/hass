@@ -112,6 +112,14 @@ Panel {
                   root.expandedControlCursorIndex + delta))
   }
 
+  function selectTab(tabId) {
+    if (!serviceReady) return
+    hass.setActiveTab(tabId)
+    cursorIndex = 0
+    expandedControlCursorIndex = -1
+    expandedEntityId = ""
+  }
+
   function switchTab(delta) {
     if (!serviceReady || tabs.length < 2) return
     var current = 0
@@ -119,10 +127,7 @@ Panel {
       if (tabs[i].id === hass.effectiveTab) { current = i; break }
     }
     var next = (current + delta + tabs.length) % tabs.length
-    hass.setActiveTab(tabs[next].id)
-    cursorIndex = 0
-    expandedControlCursorIndex = -1
-    expandedEntityId = ""
+    root.selectTab(tabs[next].id)
   }
 
   function currentRow() {
@@ -353,35 +358,56 @@ Panel {
         PanelSeparator { width: parent.width; foreground: root.fg }
 
         // ---------- area tabs ----------
-        // ButtonGroup is a Row and does not wrap, so it scrolls instead of
-        // pushing chips off the panel edge.
-        ScrollView {
-          width: parent.width
-          visible: root.tabs.length > 1 && root.hasDevices
-          implicitHeight: tabGroup.implicitHeight
-          clip: true
-          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-          ScrollBar.vertical.policy: ScrollBar.AlwaysOff
-
-        ButtonGroup {
-          id: tabGroup
-          // The panel owns the cursor, so this is not its own Tab stop.
-          focusable: false
-          foreground: root.fg
-          fontFamily: root.family
-          fontSize: Style.font.caption
-          options: root.tabs.map(function(tab) {
-            return { value: tab.id, label: tab.title }
-          })
-          value: root.serviceReady ? root.hass.effectiveTab : "favorites"
-          onChanged: function(value) {
-            if (!root.serviceReady) return
-            root.hass.setActiveTab(value)
-            root.cursorIndex = 0
-            root.expandedControlCursorIndex = -1
-            root.expandedEntityId = ""
+        // Two layouts for the same chips, chosen by the "Wrap area tabs"
+        // setting: a Flow that spills onto as many rows as the panel width
+        // needs, or a single row that scrolls sideways when the chips
+        // overflow the panel edge. The panel owns the keyboard cursor, so
+        // the chips are mouse-only and take no Tab stop.
+        Component {
+          id: areaTabChip
+          Button {
+            required property var modelData
+            text: modelData.title
+            selected: (root.serviceReady ? root.hass.effectiveTab : "favorites")
+              === modelData.id
+            bordered: true
+            foreground: root.fg
+            fontFamily: root.family
+            fontSize: Style.font.caption
+            onClicked: root.selectTab(modelData.id)
           }
         }
+
+        Item {
+          id: areaTabs
+          width: parent.width
+          visible: root.tabs.length > 1 && root.hasDevices
+          readonly property bool wrap: root.serviceReady && root.hass.wrapAreaTabs
+          implicitHeight: wrap ? wrapTabs.implicitHeight : scrollTabs.implicitHeight
+
+          Flow {
+            id: wrapTabs
+            width: parent.width
+            visible: areaTabs.wrap
+            spacing: Style.spacing.md
+            Repeater { model: root.tabs; delegate: areaTabChip }
+          }
+
+          ScrollView {
+            id: scrollTabs
+            width: parent.width
+            visible: !areaTabs.wrap
+            implicitHeight: scrollRow.implicitHeight
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+
+            Row {
+              id: scrollRow
+              spacing: Style.spacing.md
+              Repeater { model: root.tabs; delegate: areaTabChip }
+            }
+          }
         }
 
         // With tabs on screen the group already names the section.
