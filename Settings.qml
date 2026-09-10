@@ -631,6 +631,18 @@ Item {
               !root.service.showPanelPinOnHover)
           }
         }
+
+        Toggle {
+          width: parent.width
+          label: "Wrap area tabs"
+          description: "Let the area tabs flow onto multiple rows instead of scrolling sideways when they don't fit."
+          checked: root.service ? root.service.wrapAreaTabs : false
+          foreground: root.foreground
+          fontFamily: root.family
+          onClicked: if (root.service) {
+            root.service.setWrapAreaTabs(!root.service.wrapAreaTabs)
+          }
+        }
       }
     }
   }

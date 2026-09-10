@@ -5,8 +5,8 @@ var KEYS = [
   "demoFavorites", "roomReadings", "demoRoomReadings",
   "pinnedRoomReadings", "demoPinnedRoomReadings",
   "panelOrder", "demoPanelOrder",
-  "groupByArea", "showEntityIcons", "showPanelPinOnHover", "selectedTab",
-  "displayNameOverrides", "iconOverrides"
+  "groupByArea", "showEntityIcons", "showPanelPinOnHover", "wrapAreaTabs",
+  "selectedTab", "displayNameOverrides", "iconOverrides"
 ]
 
 function stringList(value, fallback) {
@@ -146,6 +146,7 @@ function parse(text, demoDefaults) {
       groupByArea: raw.groupByArea === true,
       showEntityIcons: raw.showEntityIcons !== false,
       showPanelPinOnHover: raw.showPanelPinOnHover === true,
+      wrapAreaTabs: raw.wrapAreaTabs === true,
       selectedTab: typeof raw.selectedTab === "string" && raw.selectedTab
         ? raw.selectedTab : "favorites",
       displayNameOverrides: plainMap(raw.displayNameOverrides),
