@@ -182,10 +182,15 @@ pin_block = next(block for _, block in blocks(settings_row, "PanelActionButton")
 check("bordered:" not in pin_block
       and "row.pinned ? Color.accent : Color.muted" in pin_block,
       "the settings pin uses geometry instead of colour to show saved state")
-check("pinned: modelData.pinned" in settings,
+# The device lists are reconciled into ListModels, so a row's saved pin state
+# and pinnable flag reach the delegate as model roles rather than a modelData
+# object. Both must still be projected from the room-reading source rows.
+check("pinned: r.pinned === true" in settings,
       "the Devices list does not project saved room pin state")
-check("pinnable: modelData.roomReading === true" in settings,
+check("pinnable: r.roomReading === true" in settings,
       "the Devices list does not identify pinnable room rows")
+check("pinned: browseRow.pinned" in settings and "pinned: favRow.pinned" in settings,
+      "a device row delegate does not forward saved pin state to the entity row")
 
 print()
 if failures:

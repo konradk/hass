@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "Connection.js" as Connection
+import "ListSync.js" as ListSync
 
 // Connection credentials and device picking.
 //
@@ -655,6 +656,66 @@ Item {
            root.service.browseEntities(root.appliedQuery, root.domainFilter))
         : []
 
+      // The two lists are driven by these persistent models rather than by the
+      // arrays above: a star toggle and every throttled state tick rebuild the
+      // arrays from scratch, and handing a ListView a fresh array model snaps
+      // it straight back to the top. `ListSync.sync` diffs the rebuilt rows
+      // into the model as the few insert/move/set/remove operations that
+      // actually changed, so the ListView holds its scroll position.
+      ListModel { id: resultModel }
+      ListModel { id: favoriteModel }
+
+      function browseRows() {
+        var roomFilter = root.domainFilter === "room_readings"
+        var rows = devices.results
+        var out = []
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i]
+          out.push({
+            entityId: r.entityId,
+            name: r.name,
+            icon: r.icon,
+            // The browse list shows the entity id for real entities and the
+            // reading summary for room-reading rows.
+            detail: roomFilter
+              ? (r.detail === undefined ? "" : r.detail) : r.entityId,
+            favorite: r.favorite === true,
+            roomReading: roomFilter,
+            // Only ever consulted for the room-readings filter, where the row
+            // carries a device id; harmless false for every real entity.
+            pinnable: r.roomReading === true,
+            pinned: r.pinned === true
+          })
+        }
+        return out
+      }
+
+      function favoriteRows() {
+        var rows = devices.favorites
+        var out = []
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i]
+          out.push({
+            entityId: r.entityId,
+            panelItemId: r.panelItemId,
+            name: r.name,
+            icon: r.icon,
+            detail: r.available ? r.state : "Unavailable",
+            roomReading: r.roomReading === true,
+            pinnable: r.roomReading === true,
+            pinned: r.pinned === true
+          })
+        }
+        return out
+      }
+
+      onResultsChanged: ListSync.sync(resultModel, browseRows(), "entityId")
+      onFavoritesChanged: ListSync.sync(favoriteModel, favoriteRows(), "panelItemId")
+      Component.onCompleted: {
+        ListSync.sync(resultModel, browseRows(), "entityId")
+        ListSync.sync(favoriteModel, favoriteRows(), "panelItemId")
+      }
+
       TextField {
         id: search
         anchors { top: parent.top; left: parent.left; right: parent.right }
@@ -726,7 +787,8 @@ Item {
           }
 
           // Virtualized, unlike a Repeater, which would build a delegate per
-          // entity on every keystroke.
+          // entity on every keystroke. Reconciled in place (see resultModel)
+          // so it keeps its scroll position across star toggles and ticks.
           ListView {
             id: deviceList
             anchors {
@@ -736,36 +798,50 @@ Item {
             anchors.topMargin: Style.spacing.sm
             clip: true
             spacing: Style.spacing.xxs
-            model: devices.results
+            model: resultModel
             cacheBuffer: Style.space(400)
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            // Jump to the top when the user asks a new question, and only
-            // then. `results` is also rebuilt every time the throttled state
-            // revision ticks — a live instance does that a few times a second
-            // — so resetting on every model change yanked the list back to the
-            // top while someone was scrolling through it.
+            // A new search or a filter switch genuinely replaces the list, and
+            // there the top is the right place to be.
             Connections {
               target: root
               function onAppliedQueryChanged() { deviceList.positionViewAtBeginning() }
               function onDomainFilterChanged() { deviceList.positionViewAtBeginning() }
             }
 
-            delegate: SettingsEntityRow {
-              required property var modelData
+            // A plain wrapper so the row's values arrive as required
+            // properties (the reconciled model's roles) rather than as a
+            // `modelData` object.
+            delegate: Item {
+              id: browseRow
+              required property string entityId
+              required property string name
+              required property string icon
+              required property string detail
+              required property bool favorite
+              required property bool roomReading
+              required property bool pinnable
+              required property bool pinned
               width: deviceList.width
-              entityId: modelData.entityId
-              name: modelData.name
-              icon: modelData.icon
-              detail: root.domainFilter === "room_readings"
-                ? modelData.detail : modelData.entityId
-              favorite: modelData.favorite
-              reorderable: false
-              roomReading: root.domainFilter === "room_readings"
-              pinnable: modelData.roomReading === true
-              pinned: modelData.pinned === true
-              service: root.service
-              family: root.family
+              implicitHeight: browseRowBody.implicitHeight
+              height: implicitHeight
+
+              SettingsEntityRow {
+                id: browseRowBody
+                width: parent.width
+                entityId: browseRow.entityId
+                name: browseRow.name
+                icon: browseRow.icon
+                detail: browseRow.detail
+                favorite: browseRow.favorite
+                reorderable: false
+                roomReading: browseRow.roomReading
+                pinnable: browseRow.pinnable
+                pinned: browseRow.pinned
+                service: root.service
+                family: root.family
+              }
             }
           }
         }
@@ -802,6 +878,8 @@ Item {
             wrapMode: Text.WordWrap
           }
 
+          // Reconciled in place (see favoriteModel) so a reorder, an unstar,
+          // or a state tick doesn't snap the list back to the top.
           ListView {
             id: favList
             anchors {
@@ -811,24 +889,39 @@ Item {
             anchors.topMargin: Style.spacing.sm
             clip: true
             spacing: Style.spacing.xxs
-            model: devices.favorites
+            model: favoriteModel
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            delegate: SettingsEntityRow {
-              required property var modelData
+            delegate: Item {
+              id: favRow
+              required property string entityId
+              required property string panelItemId
+              required property string name
+              required property string icon
+              required property string detail
+              required property bool roomReading
+              required property bool pinnable
+              required property bool pinned
               width: favList.width
-              entityId: modelData.entityId
-              name: modelData.name
-              icon: modelData.icon
-              detail: modelData.available ? modelData.state : "Unavailable"
-              favorite: true
-              reorderable: true
-              roomReading: modelData.roomReading
-              pinnable: modelData.roomReading === true
-              pinned: modelData.pinned
-              panelItemId: modelData.panelItemId
-              service: root.service
-              family: root.family
+              implicitHeight: favRowBody.implicitHeight
+              height: implicitHeight
+
+              SettingsEntityRow {
+                id: favRowBody
+                width: parent.width
+                entityId: favRow.entityId
+                name: favRow.name
+                icon: favRow.icon
+                detail: favRow.detail
+                favorite: true
+                reorderable: true
+                roomReading: favRow.roomReading
+                pinnable: favRow.pinnable
+                pinned: favRow.pinned
+                panelItemId: favRow.panelItemId
+                service: root.service
+                family: root.family
+              }
             }
           }
         }
