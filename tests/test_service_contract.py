@@ -46,6 +46,9 @@ def function_block(name):
 
 def main():
     print("service: credential and connection lifecycle invariants")
+    method_names = re.findall(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", service)
+    check("the QML service has no duplicate method names",
+          len(method_names) == len(set(method_names)))
     current_config = function_block("currentConfig")
     check("config serialization never contains a token",
           "token" not in current_config.lower())
@@ -161,6 +164,28 @@ def main():
     check("room card ListModel roles keep stable primitive types",
           "controlPending: !!(" in room_projection
           and ') || ""' in room_projection)
+    check("history is a tagged bridge op, not a Home Assistant service call",
+          'op: "history"' in function_block("requestHistoryBatch")
+          and "root.callService(" not in function_block("requestHistoryBatch")
+          and "historyGraph" in function_block("requestHistory"))
+    check("external history entity ids are validated before map access",
+          "EntityStore.validEntityId(entityId)" in function_block("handleHistory")
+          and "EntityStore.validEntityId(entity.entity_id)"
+          in function_block("appendHistoryPoint"))
+    check("expanded room and entity pins persist independently",
+          "pinnedRoomReadings" in service
+          and "pinnedEntities" in service
+          and "toggleRoomReadingPinned" in service
+          and "toggleEntityPinned" in service)
+    favorites_projection = function_block("favoriteSummaries")
+    browse_projection = function_block("browseEntities")
+    check("settings pins every expandable selected row",
+          "pinnable: true" in favorites_projection
+          and "pinnable: entity !== undefined && Model.isExpandable(entity)"
+          in favorites_projection
+          and "pinned: root.isEntityPinned(itemId)" in favorites_projection
+          and "pinnable: Model.isExpandable(entity)" in browse_projection
+          and "pinned: root.isEntityPinned(entityId)" in browse_projection)
 
     check("selected tab persistence is debounced",
           "selectedTabSaveDebounce.restart()" in service)

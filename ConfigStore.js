@@ -4,6 +4,7 @@ var KEYS = [
   "baseUrl", "localUrl", "trustedNetwork", "demoMode", "favorites",
   "demoFavorites", "roomReadings", "demoRoomReadings",
   "pinnedRoomReadings", "demoPinnedRoomReadings",
+  "pinnedEntities", "demoPinnedEntities",
   "panelOrder", "demoPanelOrder",
   "groupByArea", "showEntityIcons", "showPanelPinOnHover", "selectedTab",
   "displayNameOverrides", "iconOverrides"
@@ -91,6 +92,13 @@ function selectedDevices(value, roomReadings) {
   return requested.filter(function(id) { return selected[id] === true })
 }
 
+function selectedEntities(value, favorites) {
+  var requested = stringList(value, [])
+  var selected = {}
+  for (var i = 0; i < favorites.length; i++) selected[favorites[i]] = true
+  return requested.filter(function(id) { return selected[id] === true })
+}
+
 function plainMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {}
   var out = {}
@@ -140,6 +148,8 @@ function parse(text, demoDefaults) {
       pinnedRoomReadings: selectedDevices(raw.pinnedRoomReadings, roomReadings),
       demoPinnedRoomReadings: selectedDevices(
         raw.demoPinnedRoomReadings, demoRoomReadings),
+      pinnedEntities: selectedEntities(raw.pinnedEntities, favorites),
+      demoPinnedEntities: selectedEntities(raw.demoPinnedEntities, demoFavorites),
       panelOrder: normalizedPanelOrder(raw.panelOrder, favorites, roomReadings),
       demoPanelOrder: normalizedPanelOrder(
         raw.demoPanelOrder, demoFavorites, demoRoomReadings),

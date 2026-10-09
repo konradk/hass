@@ -55,6 +55,158 @@ function isExpandable(entity) {
   return capabilitiesFor(entity).expandable
 }
 
+function parseNumericState(value) {
+  if (typeof value === "number") return isFinite(value) ? value : null
+  if (typeof value !== "string") return null
+  var trimmed = value.trim()
+  if (!trimmed) return null
+  var parsed = Number(trimmed)
+  return isFinite(parsed) ? parsed : null
+}
+
+function hasHistoryGraph(entity) {
+  return domain(entity) === "sensor" && parseNumericState(stateOf(entity)) !== null
+}
+
+var HISTORY_HOURS = [1, 3, 6, 12, 24]
+var HISTORY_MAX_POINTS = 240
+
+function normalizeHistoryHours(hours) {
+  if (typeof hours === "string" && hours.trim() !== "") hours = Number(hours)
+  if (typeof hours !== "number" || !isFinite(hours)) return 0
+  for (var i = 0; i < HISTORY_HOURS.length; i++) {
+    if (hours === HISTORY_HOURS[i]) return hours
+  }
+  return 0
+}
+
+function historyWindowLabel(hours) {
+  var windowHours = normalizeHistoryHours(hours)
+  if (windowHours === 24) return "1d"
+  return windowHours ? String(windowHours) + "h" : ""
+}
+
+function historyAxisEnd(points, hours, localNow) {
+  var windowHours = normalizeHistoryHours(hours)
+  if (!windowHours || typeof localNow !== "number" || !isFinite(localNow))
+    return 0
+  if (!points || !points.length) return localNow
+  var newest = Number(points[points.length - 1].t)
+  if (!isFinite(newest)) return localNow
+  if (newest > localNow || localNow - newest > windowHours * 3600)
+    return newest
+  return localNow
+}
+
+function downsampleHistoryPoints(points, limit) {
+  if (!points || !points.length) return []
+  var cap = typeof limit === "number" && isFinite(limit) && limit > 0
+    ? Math.floor(limit) : HISTORY_MAX_POINTS
+  if (points.length <= cap) return points.slice()
+  if (cap === 1) return [points[points.length - 1]]
+  var selected = { 0: true }
+  selected[points.length - 1] = true
+  var selectedCount = points.length > 1 ? 2 : 1
+  for (var transition = 1; transition < points.length; transition++) {
+    if ((points[transition - 1].v === null) !== (points[transition].v === null)) {
+      if (!selected[transition - 1]) { selected[transition - 1] = true; selectedCount++ }
+      if (!selected[transition]) { selected[transition] = true; selectedCount++ }
+    }
+  }
+  if (selectedCount >= cap) {
+    var required = []
+    for (var requiredIndex = 0; requiredIndex < points.length; requiredIndex++) {
+      if (selected[requiredIndex]) required.push(points[requiredIndex])
+    }
+    var trimmed = []
+    var requiredStep = (required.length - 1) / Math.max(1, cap - 1)
+    for (var requiredSlot = 0; requiredSlot < cap; requiredSlot++)
+      trimmed.push(required[Math.round(requiredSlot * requiredStep)])
+    return trimmed
+  }
+  var capacity = Math.max(0, cap - selectedCount)
+  var buckets = Math.max(1, Math.floor(capacity / 2))
+  var start = Number(points[0].t)
+  var span = Math.max(1, Number(points[points.length - 1].t) - start)
+  for (var bucket = 0; bucket < buckets && selectedCount < cap; bucket++) {
+    var lowT = start + span * bucket / buckets
+    var highT = start + span * (bucket + 1) / buckets
+    var minIndex = -1
+    var maxIndex = -1
+    for (var index = 0; index < points.length; index++) {
+      var point = points[index]
+      if (selected[index] || point.v === null || Number(point.t) < lowT
+          || (Number(point.t) >= highT && bucket !== buckets - 1)) continue
+      if (minIndex < 0 || point.v < points[minIndex].v) minIndex = index
+      if (maxIndex < 0 || point.v > points[maxIndex].v) maxIndex = index
+    }
+    if (minIndex >= 0 && !selected[minIndex]) {
+      selected[minIndex] = true
+      selectedCount++
+    }
+    if (maxIndex >= 0 && selectedCount < cap && !selected[maxIndex]) {
+      selected[maxIndex] = true
+      selectedCount++
+    }
+  }
+  var out = []
+  for (var outputIndex = 0; outputIndex < points.length; outputIndex++) {
+    if (selected[outputIndex]) out.push(points[outputIndex])
+  }
+  return out
+}
+
+function clampHistoryPoints(points, hours, now, maxPoints) {
+  var windowHours = normalizeHistoryHours(hours)
+  if (!points || !points.length || !windowHours) return []
+  if (typeof now !== "number" || !isFinite(now)) return []
+
+  function keepFrom(end) {
+    var start = end - windowHours * 3600
+    var kept = []
+    for (var i = 0; i < points.length; i++) {
+      var point = points[i]
+      if (!point) continue
+      if (typeof point.t !== "number" || !isFinite(point.t)) continue
+      if (point.v !== null
+          && (typeof point.v !== "number" || !isFinite(point.v))) continue
+      if (point.t < start) continue
+      kept.push({ t: point.t, v: point.v })
+    }
+    return kept
+  }
+
+  var kept = keepFrom(now)
+  // Recorder timestamps follow Home Assistant's clock. If this desktop is ahead
+  // of the server, anchoring to Date.now() can drop every sample — fall back
+  // to the newest sample so a successful fetch still has something to draw.
+  if (!kept.length) {
+    var latest = null
+    for (var i = 0; i < points.length; i++) {
+      var point = points[i]
+      if (!point) continue
+      if (typeof point.t !== "number" || !isFinite(point.t)) continue
+      if (latest === null || point.t > latest) latest = point.t
+    }
+    if (latest !== null && latest < now) kept = keepFrom(latest)
+  }
+  return downsampleHistoryPoints(kept, maxPoints)
+}
+
+// Last known sample at or before the cursor time (step-chart semantics).
+function nearestHistoryIndex(points, x, left, spanX, minT, maxT) {
+  if (!points || !points.length || !(spanX > 0)) return -1
+  if (!(maxT > minT)) return points.length - 1
+  var t = minT + ((x - left) / spanX) * (maxT - minT)
+  if (t < points[0].t) return 0
+  var best = 0
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].t <= t) best = i
+    else break
+  }
+  return best
+}
+
 function isOn(entity) {
   var state = stateOf(entity)
   // A climate entity's state is its HVAC mode, so every real mode except
@@ -334,6 +486,84 @@ function roomReadingSummary(readings, limit) {
   }
   if (values.length > parts.length) parts.push("+" + (values.length - parts.length))
   return parts.join(" · ")
+}
+
+function barDataEligible(entity) {
+  var dom = domain(entity)
+  return dom === "sensor" || dom === "binary_sensor" || dom === "climate"
+}
+
+function barDataReadings(entity, unitFallback, device) {
+  if (!entity) return []
+  var environmental = environmentalReading(entity, device)
+  if (environmental) return [environmental]
+
+  if (domain(entity) !== "climate") {
+    return [{
+      entityId: String(entity.entity_id || ""),
+      kind: "state",
+      label: name(entity),
+      value: displayState(entity),
+      quality: isUnavailable(entity) ? "unknown" : "neutral",
+      order: 10
+    }]
+  }
+
+  if (isUnavailable(entity)) {
+    return [{
+      entityId: String(entity.entity_id || ""),
+      kind: "climate_state",
+      label: "AC",
+      value: displayState(entity),
+      quality: "unknown",
+      order: 10
+    }]
+  }
+
+  var a = attrs(entity)
+  var unit = temperatureUnit(entity, unitFallback)
+  var readings = []
+  if (typeof a.current_temperature === "number" && isFinite(a.current_temperature)) {
+    readings.push({
+      entityId: String(entity.entity_id || ""),
+      kind: "climate_current",
+      label: "Current",
+      value: formatTemp(a.current_temperature, unit),
+      quality: "neutral",
+      order: 10
+    })
+  }
+
+  var target = ""
+  if (typeof a.target_temp_low === "number" && isFinite(a.target_temp_low)
+      && typeof a.target_temp_high === "number" && isFinite(a.target_temp_high)) {
+    target = formatTemp(a.target_temp_low, "") + "–"
+      + formatTemp(a.target_temp_high, unit)
+  } else if (typeof a.temperature === "number" && isFinite(a.temperature)) {
+    target = formatTemp(a.temperature, unit)
+  }
+  if (target) {
+    readings.push({
+      entityId: String(entity.entity_id || ""),
+      kind: "climate_target",
+      label: "Target",
+      value: "→ " + target,
+      quality: "neutral",
+      order: 20
+    })
+  }
+
+  if (!readings.length) {
+    readings.push({
+      entityId: String(entity.entity_id || ""),
+      kind: "climate_state",
+      label: "Mode",
+      value: displayState(entity),
+      quality: "neutral",
+      order: 10
+    })
+  }
+  return readings
 }
 
 function mediaSubtitle(entity) {
@@ -942,6 +1172,7 @@ function capabilitiesFor(entity) {
     climateFanMode: false,
     climatePresetMode: false,
     climateSwingMode: false,
+    historyGraph: false,
     expandable: false,
     reserveExpandSlot: false
   }
@@ -978,6 +1209,7 @@ function capabilitiesFor(entity) {
       && hasClimateModeOption(entity, "swing_modes")
 
   }
+  result.historyGraph = available && hasHistoryGraph(entity)
   result.expandable = result.brightness || result.color || result.colorTemp
     || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
     || result.mediaVolume || result.coverOpen || result.coverStop
@@ -985,6 +1217,7 @@ function capabilitiesFor(entity) {
     || result.climateTarget || result.climateRange
     || result.climateHvacMode || result.climateFanMode
     || result.climatePresetMode || result.climateSwingMode
+    || result.historyGraph
   // Climate integrations commonly clear the live target while the device is
   // off. Keep the row geometry stable without pretending there is a target
   // value to edit: the chevron remains hidden/disabled until controls are

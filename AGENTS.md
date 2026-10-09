@@ -33,7 +33,10 @@ bridge and "no suggestion" for the UI, not an error either way.
 - `Model.js`: entity display policy, capabilities, action classification, and
   attribute redaction.
 - `RowModel.js`: projection from an entity into a QML `ListModel` row.
-- `Panel.qml`: bar widget, popup, keyboard navigation, and IPC surface.
+- `BarWidget.qml`: dispatches the main panel entry and repeated data entries.
+- `Panel.qml`: popup, keyboard navigation, and IPC surface.
+- `DataBarWidget.qml`: themed room and individual reading instances.
+- `BarData.js`: repeated bar entry identity, placement, and removal policy.
 - `Settings.qml`: connection settings and entity picker.
 - `controls/`: domain-specific expanded controls.
 - `bin/hass-bridge`: WebSocket protocol adapter and demo backend.

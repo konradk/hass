@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Add or remove a Home Assistant data instance in the Omarchy bar layout.
+
+Omarchy 4.0.4 only lets a replacement bar edit the bar layout from QML
+(shell.mutateShellConfig returns false for a bar widget), so the panel falls
+back to this helper. It applies the same add/remove rules as BarData.js to
+~/.config/omarchy/shell.json and asks the running shell to reload the file.
+
+usage: hass-bar-layout add|remove <base64 of the JSON entry>
+
+Environment (tests): HASS_BAR_LAYOUT_CONFIG overrides the config path,
+HASS_BAR_LAYOUT_NO_RELOAD=1 skips the shell reload.
+"""
+import base64
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+SECTIONS = ("left", "center", "right")
+
+
+def widget_id(kind, identity):
+    return "hass.data." + str(kind or "") + "." + str(identity or "")
+
+
+def valid(entry):
+    if not isinstance(entry, dict):
+        return False
+    kind = entry.get("dataKind")
+    if kind == "entity":
+        identity = str(entry.get("entityId") or "")
+    elif kind == "room":
+        identity = str(entry.get("deviceId") or "")
+    else:
+        return False
+    return identity != "" and entry.get("id") in ("hass", widget_id(kind, identity))
+
+
+def same_instance(left, right):
+    if not valid(left) or not valid(right) or left["dataKind"] != right["dataKind"]:
+        return False
+    key = "entityId" if left["dataKind"] == "entity" else "deviceId"
+    return str(left.get(key)) == str(right.get(key))
+
+
+def entry_id(entry):
+    if isinstance(entry, str):
+        return entry
+    return str(entry.get("id") or "") if isinstance(entry, dict) else ""
+
+
+def ensure_layout(config):
+    if not isinstance(config.get("bar"), dict):
+        config["bar"] = {}
+    if not isinstance(config["bar"].get("layout"), dict):
+        config["bar"]["layout"] = {}
+    for section in SECTIONS:
+        if not isinstance(config["bar"]["layout"].get(section), list):
+            config["bar"]["layout"][section] = []
+    return config["bar"]["layout"]
+
+
+def location(config, target):
+    if not isinstance(config, dict) or not valid(target):
+        return None
+    layout = (config.get("bar") or {}).get("layout")
+    if not isinstance(layout, dict):
+        return None
+    for section in SECTIONS:
+        entries = layout.get(section)
+        if not isinstance(entries, list):
+            continue
+        for index, entry in enumerate(entries):
+            if same_instance(entry, target):
+                return section, index
+    return None
+
+
+def add(config, target):
+    if not isinstance(config, dict) or not valid(target) or location(config, target):
+        return False
+    layout = ensure_layout(config)
+    section, insert_at = "right", len(layout["right"])
+    # Keep data instances beside the main panel entry, after earlier ones.
+    for name in SECTIONS:
+        entries = layout[name]
+        main = -1
+        for index, entry in enumerate(entries):
+            if entry_id(entry) == "hass" and (not isinstance(entry, dict) or not entry.get("dataKind")):
+                main = index
+        if main == -1:
+            continue
+        section, insert_at = name, main + 1
+        while insert_at < len(entries) and valid(entries[insert_at]):
+            insert_at += 1
+        break
+    layout[section].insert(insert_at, dict(target))
+    return True
+
+
+def remove(config, target):
+    found = location(config, target)
+    if not found:
+        return False
+    del config["bar"]["layout"][found[0]][found[1]]
+    return True
+
+
+def config_path():
+    return os.environ.get("HASS_BAR_LAYOUT_CONFIG") or os.path.expanduser("~/.config/omarchy/shell.json")
+
+
+def load(path):
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    omarchy = os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy"
+    defaults = os.path.join(omarchy, "config", "omarchy", "shell.json")
+    if os.path.isfile(defaults):
+        with open(defaults, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def save(path, config):
+    config["version"] = 1
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile("w", dir=directory, delete=False, encoding="utf-8")
+    try:
+        with handle:
+            json.dump(config, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        os.replace(handle.name, path)
+    except BaseException:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv):
+    if len(argv) != 3 or argv[1] not in ("add", "remove"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    try:
+        target = json.loads(base64.b64decode(argv[2], validate=True).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        print("hass-bar-layout: the entry is not valid base64 JSON", file=sys.stderr)
+        return 2
+    if not valid(target):
+        print("hass-bar-layout: not a Home Assistant data entry", file=sys.stderr)
+        return 2
+    path = config_path()
+    config = load(path)
+    changed = add(config, target) if argv[1] == "add" else remove(config, target)
+    if not changed:
+        return 0
+    save(path, config)
+    if os.environ.get("HASS_BAR_LAYOUT_NO_RELOAD") != "1":
+        try:
+            subprocess.run(["omarchy-shell", "shell", "reloadConfig"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

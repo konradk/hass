@@ -106,6 +106,7 @@ function projectRegistries(areas, entities, devices) {
   }
 
   var mapping = dictionary()
+  var entityDevice = dictionary()
   var deviceEntities = dictionary()
   var entityRegistry = dictionary()
   // Home Assistant keeps per-light favourite colours in the registry entry's
@@ -129,6 +130,7 @@ function projectRegistries(areas, entities, devices) {
 
     var deviceId = safeKey(entry.device_id) ? entry.device_id : ""
     if (deviceId) {
+      entityDevice[entry.entity_id] = deviceId
       if (!deviceEntities[deviceId]) deviceEntities[deviceId] = []
       deviceEntities[deviceId].push(entry.entity_id)
     }
@@ -149,6 +151,7 @@ function projectRegistries(areas, entities, devices) {
     deviceNames: deviceNames,
     deviceInfo: deviceInfoById,
     deviceArea: deviceArea,
+    entityDevice: entityDevice,
     deviceEntities: deviceEntities,
     entityRegistry: entityRegistry
   }
