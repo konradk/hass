@@ -899,6 +899,8 @@ var CLIMATE_SWING_MODE = 32
 var CLIMATE_TURN_OFF = 128
 var CLIMATE_TURN_ON = 256
 
+var CAMERA_STREAM = 2
+
 function featureBits(entity) {
   var value = attrs(entity).supported_features
   return typeof value === "number" && isFinite(value) ? Math.floor(value) : 0
@@ -942,6 +944,8 @@ function capabilitiesFor(entity) {
     climateFanMode: false,
     climatePresetMode: false,
     climateSwingMode: false,
+    cameraSnapshot: available && dom === "camera",
+    cameraStream: available && dom === "camera" && hasFeature(bits, CAMERA_STREAM),
     expandable: false,
     reserveExpandSlot: false
   }
@@ -985,6 +989,7 @@ function capabilitiesFor(entity) {
     || result.climateTarget || result.climateRange
     || result.climateHvacMode || result.climateFanMode
     || result.climatePresetMode || result.climateSwingMode
+    || result.cameraSnapshot
   // Climate integrations commonly clear the live target while the device is
   // off. Keep the row geometry stable without pretending there is a target
   // value to edit: the chevron remains hidden/disabled until controls are
@@ -1349,7 +1354,7 @@ function panelActivityEntities(favoriteIds, roomCards, states) {
   return picked
 }
 
-// Settings browser buckets. No "Cameras" until cameras ship.
+// Settings browser buckets.
 var DOMAIN_FILTERS = [
   { id: "all", title: "All", domains: [] },
   { id: "room_readings", title: "Room readings", domains: [] },
@@ -1359,6 +1364,7 @@ var DOMAIN_FILTERS = [
   { id: "climate", title: "Climate", domains: ["climate"] },
   { id: "media", title: "Media", domains: ["media_player"] },
   { id: "covers", title: "Covers", domains: ["cover"] },
+  { id: "cameras", title: "Cameras", domains: ["camera"] },
   { id: "sensors", title: "Sensors", domains: ["sensor", "binary_sensor"] }
 ]
 

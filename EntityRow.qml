@@ -281,6 +281,7 @@ CursorSurface {
         case "media_player": return mediaControls
         case "climate": return climateControls
         case "cover": return coverControls
+        case "camera": return cameraControls
         default: return null
         }
       }
@@ -309,6 +310,13 @@ CursorSurface {
       onSelectorCursorRequested: function(index) {
         row.expandedControlCursorRequested(index)
       }
+    }
+  }
+
+  Component {
+    id: cameraControls
+    CameraControls {
+      hass: row.hass; entityId: row.entityId; entity: row.entity; bar: row.bar
     }
   }
 

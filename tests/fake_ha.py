@@ -7,6 +7,7 @@ IPv6, and what happens when the server hangs up.
 """
 
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -77,7 +78,8 @@ def send_declared_frame(conn, opcode, length, fin=True):
                  + struct.pack("!Q", length))
 
 
-def handshake(conn):
+def read_request(conn):
+    """Read one HTTP request head: (path, {lowercase header: value}, rest)."""
     raw = b""
     while b"\r\n\r\n" not in raw:
         chunk = conn.recv(4096)
@@ -85,11 +87,18 @@ def handshake(conn):
             raise ConnectionError("client closed during handshake")
         raw += chunk
     head, _, rest = raw.partition(b"\r\n\r\n")
-    key = ""
-    for line in head.decode("latin-1").split("\r\n")[1:]:
+    lines = head.decode("latin-1").split("\r\n")
+    request_line = lines[0].split(" ")
+    path = request_line[1] if len(request_line) > 1 else ""
+    headers = {}
+    for line in lines[1:]:
         name, _, value = line.partition(":")
-        if name.strip().lower() == "sec-websocket-key":
-            key = value.strip()
+        headers[name.strip().lower()] = value.strip()
+    return path, headers, rest
+
+
+def handshake(conn, headers, rest):
+    key = headers.get("sec-websocket-key", "")
     accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
     conn.sendall((
         "HTTP/1.1 101 Switching Protocols\r\n"
@@ -113,7 +122,11 @@ class FakeHA:
     def __init__(self, auth_mode="ok", drop_after=None, fail_calls=False,
                  giant_frame=False, fail_requests=None, delays=None,
                  invalid_message=False, empty_fragments=0,
-                 host="127.0.0.1", tls=False, echo_auth_token=False):
+                 host="127.0.0.1", tls=False, echo_auth_token=False,
+                 camera_image=b"\xff\xd8fake-jpeg\xff\xd9",
+                 camera_content_type="image/jpeg", camera_status=200,
+                 camera_body=None, stream_fail=False, hls_files=None,
+                 hls_gzip=False):
         self.auth_mode = auth_mode
         self.drop_after = drop_after
         # Reject every call_service. Home Assistant does this for a service
@@ -130,6 +143,29 @@ class FakeHA:
         self.host = host
         self.tls = tls
         self.echo_auth_token = echo_auth_token
+        # GET /api/camera_proxy/<entity_id>, the snapshot endpoint. Every
+        # request is recorded as (path, Authorization header).
+        self.camera_image = camera_image
+        self.camera_content_type = camera_content_type
+        self.camera_status = camera_status
+        # Overrides the response body, e.g. to echo the token back in an error.
+        self.camera_body = camera_body
+        self.camera_requests = []
+        # camera/stream over the WebSocket hands out /api/hls/<token>/..., and
+        # the files below are then served from there. Requests are recorded
+        # as (path with query, Authorization header).
+        self.stream_fail = stream_fail
+        self.stream_token = "hlstoken123"
+        self.hls_files = dict(hls_files or {
+            "master_playlist.m3u8": b"#EXTM3U\nplaylist.m3u8\n",
+            "playlist.m3u8": b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\nsegment/0.m4s\n",
+            "init.mp4": b"init-bytes",
+            "segment/0.m4s": b"segment-bytes",
+        })
+        self.hls_requests = []
+        # Home Assistant gzips HLS playlists whatever the client asked for.
+        self.hls_gzip = hls_gzip
+        self.stream_calls = []
         self.connections = 0
         self.states = [
             {"entity_id": "light.test", "state": "off",
@@ -181,7 +217,14 @@ class FakeHA:
         try:
             if self._tls_context is not None:
                 conn = self._tls_context.wrap_socket(conn, server_side=True)
-            buf = handshake(conn)
+            path, headers, rest = read_request(conn)
+            if path.startswith("/api/camera_proxy/"):
+                self._camera(conn, path, headers)
+                return
+            if path.startswith("/api/hls/"):
+                self._hls(conn, path, headers)
+                return
+            buf = handshake(conn, headers, rest)
             send_json(conn, {"type": "auth_required", "ha_version": "test"})
             handled = 0
             while not self._stop.is_set():
@@ -201,6 +244,41 @@ class FakeHA:
                 conn.close()
             except Exception:
                 pass
+
+    def _camera(self, conn, path, headers):
+        self.camera_requests.append((path, headers.get("authorization", "")))
+        body = self.camera_body
+        if body is None:
+            body = self.camera_image if self.camera_status == 200 else b"error"
+        reason = {200: "OK", 401: "Unauthorized", 404: "Not Found"}.get(
+            self.camera_status, "Error")
+        conn.sendall((
+            "HTTP/1.1 %d %s\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n"
+            % (self.camera_status, reason, self.camera_content_type, len(body))
+        ).encode() + body)
+
+    def _hls(self, conn, path, headers):
+        self.hls_requests.append((path, headers.get("authorization", "")))
+        prefix = "/api/hls/%s/" % self.stream_token
+        name = path.split("?", 1)[0]
+        body = self.hls_files.get(name[len(prefix):]) \
+            if name.startswith(prefix) else None
+        status = "200 OK" if body is not None else "404 Not Found"
+        body = body if body is not None else b"missing"
+        encoding = ""
+        if self.hls_gzip:
+            body = gzip.compress(body)
+            encoding = "Content-Encoding: gzip\r\n"
+        conn.sendall((
+            "HTTP/1.1 %s\r\n"
+            "Content-Type: application/vnd.apple.mpegurl\r\n"
+            "%s"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n" % (status, encoding, len(body))
+        ).encode() + body)
 
     def _handle(self, conn, msg, index):
         kind = msg.get("type")
@@ -266,6 +344,16 @@ class FakeHA:
         elif kind == "config/device_registry/list":
             send_json(conn, {"id": msg_id, "type": "result", "success": True,
                              "result": [{"id": "d1", "area_id": "a1"}]})
+        elif kind == "camera/stream":
+            self.stream_calls.append(msg)
+            if self.stream_fail:
+                send_json(conn, {"id": msg_id, "type": "result", "success": False,
+                                 "error": {"code": "start_stream_failed",
+                                           "message": "Camera does not support streaming"}})
+                return
+            send_json(conn, {"id": msg_id, "type": "result", "success": True,
+                             "result": {"url": "/api/hls/%s/master_playlist.m3u8"
+                                        % self.stream_token}})
         elif kind == "call_service":
             self.calls.append(msg)
             if self.fail_calls:

@@ -35,9 +35,21 @@ refreshes, `esc` closes, and `tab` moves to the next bar panel.
 | `media_player` | Previous / play-pause / next, volume slider |
 | `cover` | Open / stop / close, plus a position slider when the cover reports one |
 | `climate` | On/off when advertised, plus HVAC, fan, preset, swing, and target-temperature or low/high-band controls when advertised |
+| `camera` | Expand for live video when the camera supports streaming, otherwise a snapshot refreshed every 5 seconds |
 | `sensor`, `binary_sensor`, everything else | State display only |
 
-Cameras not yet.
+Camera snapshots come from Home Assistant's `/api/camera_proxy` endpoint and
+are fetched by the bridge with the same address, TLS verification and proxy
+bypass as the WebSocket connection. Each image is written to a private
+directory under `$XDG_RUNTIME_DIR`, replaced by the next one, and removed when
+the bridge exits; the panel only ever receives the file path.
+
+Live video uses Home Assistant's HLS stream (expect a few seconds of delay)
+and needs Qt Multimedia (`qt6-multimedia` with `qt6-multimedia-ffmpeg`);
+without it, cameras fall back to snapshots. The bridge relays the stream
+through a loopback-only server at a random path, so the media player never
+contacts Home Assistant directly and never sees a token. The stream stops when
+the row collapses or the panel closes. There is no audio.
 
 ## Scripting
 

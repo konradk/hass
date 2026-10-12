@@ -855,6 +855,68 @@ QtObject {
     root.send({ op: "refresh" })
   }
 
+  // ------------------------------------------------------------ cameras
+
+  // entityId -> { path, error }. The bridge writes each image to a private
+  // file and hands over only its path; the token never comes this way.
+  property var snapshots: Object.create(null)
+  property int snapshotRevision: 0
+
+  function requestSnapshot(entityId) {
+    if (!root.capabilities(entityId).cameraSnapshot) return false
+    return root.send({ op: "snapshot", entity_id: entityId })
+  }
+
+  function snapshotFor(entityId) {
+    return root.snapshots[entityId] || null
+  }
+
+  // entityId -> { url, error }. The url is the bridge's loopback relay, never
+  // Home Assistant itself.
+  property var streams: Object.create(null)
+  property int streamRevision: 0
+
+  function startStream(entityId) {
+    if (!root.capabilities(entityId).cameraStream) return false
+    return root.send({ op: "stream_start", entity_id: entityId })
+  }
+
+  function stopStream(entityId) {
+    delete root.streams[entityId]
+    root.streamRevision++
+    return root.send({ op: "stream_stop", entity_id: entityId })
+  }
+
+  function streamFor(entityId) {
+    return root.streams[entityId] || null
+  }
+
+  function applyStream(event) {
+    var entityId = event.entity_id
+    if (typeof entityId !== "string" || !entityId) return
+    var ok = event.ok === true && typeof event.url === "string"
+      && event.url.indexOf("http://127.0.0.1:") === 0
+    root.streams[entityId] = {
+      url: ok ? event.url : "",
+      error: ok ? "" : String(event.error || "Live video failed.")
+    }
+    root.streamRevision++
+  }
+
+  function applySnapshot(event) {
+    var entityId = event.entity_id
+    if (typeof entityId !== "string" || !entityId) return
+    var previous = root.snapshots[entityId]
+    var ok = event.ok === true && typeof event.path === "string"
+      && event.path.charAt(0) === "/"
+    // A failed refresh keeps the last good frame on screen.
+    root.snapshots[entityId] = {
+      path: ok ? event.path : (previous ? previous.path : ""),
+      error: ok ? "" : String(event.error || "Snapshot failed.")
+    }
+    root.snapshotRevision++
+  }
+
   // ------------------------------------------------------------ events
 
   function handleEvent(line) {
@@ -907,6 +969,12 @@ QtObject {
       break
     case "result":
       root.handleResult(event)
+      break
+    case "snapshot":
+      root.applySnapshot(event)
+      break
+    case "stream":
+      root.applyStream(event)
       break
     case "log":
       if (event.level === "warn") console.warn("hass-bridge: " + event.msg)
