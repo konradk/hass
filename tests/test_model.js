@@ -115,6 +115,10 @@ section("subtitles", () => {
 section("badges", () => {
   eq("scene", Model.badgeText(entity("scene.a", "unknown")), "Scene");
   eq("camera", Model.badgeText(entity("camera.a", "streaming")), "Camera");
+  eq("a button shows its kind rather than its last-press timestamp",
+     Model.badgeText(entity("button.a", "2026-10-12T08:15:00.000000+00:00")), "Button");
+  eq("an input_button too",
+     Model.badgeText(entity("input_button.a", "unknown")), "Button");
   // hvac_action is what a real climate entity exposes; the mode is the state.
   eq("climate prefers hvac_action",
      Model.badgeText(entity("climate.a", "heat", { hvac_action: "idle" })), "Idle");
@@ -486,6 +490,10 @@ section("control classification", () => {
   eq("lock is its own kind", Model.controlKind(entity("lock.a", "locked")), "lock");
   eq("scene is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
   eq("script is one-shot", Model.controlKind(entity("script.a", "off")), "activate");
+  eq("button is one-shot",
+     Model.controlKind(entity("button.a", "2026-10-12T08:15:00+00:00")), "activate");
+  eq("input_button is one-shot",
+     Model.controlKind(entity("input_button.a", "unknown")), "activate");
   eq("sensor has no control", Model.controlKind(entity("sensor.a", "5")), "none");
 
   eq("a dimmable light expands",
@@ -593,6 +601,11 @@ section("entity capabilities", () => {
   eq("unavailable controls are disabled", unavailable.expandable, false);
   eq("scenes remain activatable despite unknown state",
      Model.capabilitiesFor(entity("scene.a", "unknown")).activate, true);
+  // A button that was never pressed reports "unknown"; it still presses.
+  eq("a never-pressed button remains pressable",
+     Model.capabilitiesFor(entity("button.a", "unknown")).activate, true);
+  eq("an unavailable button cannot be pressed",
+     Model.capabilitiesFor(entity("button.a", "unavailable")).activate, false);
 });
 
 section("service calls", () => {
@@ -610,6 +623,23 @@ section("service calls", () => {
   eq("an unknown domain falls back",
      Model.toggleCall(entity("water_heater.a", "on"), true),
      { domain: "homeassistant", service: "toggle" });
+
+  eq("a scene activates with turn_on",
+     Model.activateCall(entity("scene.a", "unknown")), { domain: "scene", service: "turn_on" });
+  eq("a script runs with turn_on",
+     Model.activateCall(entity("script.a", "off")), { domain: "script", service: "turn_on" });
+  eq("a button presses",
+     Model.activateCall(entity("button.a", "unknown")), { domain: "button", service: "press" });
+  eq("an input_button presses",
+     Model.activateCall(entity("input_button.a", "unknown")),
+     { domain: "input_button", service: "press" });
+  eq("nothing else is activatable",
+     Model.activateCall(entity("light.a", "on")), null);
+
+  eq("scenes are activated", Model.activateLabel(entity("scene.a", "unknown")), "Activate");
+  eq("buttons are pressed", Model.activateLabel(entity("button.a", "unknown")), "Press");
+  eq("buttons are listed under Controls in settings",
+     Model.filterMatches("controls", entity("button.a", "unknown")), true);
 });
 
 section("icons", () => {

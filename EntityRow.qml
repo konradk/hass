@@ -2,6 +2,7 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 import "controls"
+import "Model.js" as Model
 
 // One device in the panel list, shaped after bluetooth/Panel.qml's DeviceRow.
 // The switch handles its own click, so on an expandable row the body is free
@@ -71,7 +72,7 @@ CursorSurface {
     switch (control) {
     case "toggle": return isOn ? "Turn off" : "Turn on"
     case "lock": return isOn ? "Unlock" : "Lock"
-    case "activate": return "Activate"
+    case "activate": return Model.activateLabel(row.entity)
     default: return ""
     }
   }

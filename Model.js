@@ -4,6 +4,7 @@
 // No QML types and no side effects, so it is testable outside the shell.
 
 var TOGGLEABLE_DOMAINS = ["light", "switch", "fan", "input_boolean", "humidifier"]
+var PRESS_DOMAINS = ["button", "input_button"]
 
 function attrs(entity) {
   return (entity && entity.attributes) ? entity.attributes : {}
@@ -39,11 +40,18 @@ function isUnavailable(entity) {
   return state === "unavailable" || state === "unknown"
 }
 
-// A scene's state is when it last ran, or "unknown" — not a reason to grey it out.
+// A scene's state is when it last ran and a button's when it was last pressed,
+// or "unknown" — not a reason to grey either out. A button still goes
+// unavailable with its device, though.
 function isAvailable(entity) {
   if (!entity) return false
-  if (controlKind(entity) === "activate") return true
+  if (controlKind(entity) === "activate") return oneShotAvailable(entity)
   return !isUnavailable(entity)
+}
+
+function oneShotAvailable(entity) {
+  return PRESS_DOMAINS.indexOf(domain(entity)) === -1
+    || stateOf(entity) !== "unavailable"
 }
 
 function isToggleable(entity) {
@@ -109,6 +117,7 @@ function subtitle(entity, unitFallback) {
 function badgeText(entity) {
   var dom = domain(entity)
   if (dom === "scene") return "Scene"
+  if (PRESS_DOMAINS.indexOf(dom) !== -1) return "Button"
   if (dom === "camera") return "Camera"
   if (dom === "climate") {
     // The HVAC mode is the entity's state, not an attribute; `hvac_action` is
@@ -918,8 +927,9 @@ function capabilitiesFor(entity) {
   var dom = domain(entity)
   var a = attrs(entity)
   var bits = featureBits(entity)
-  var activate = dom === "scene" || dom === "script"
-  var available = !!entity && (activate || !isUnavailable(entity))
+  var activate = activateCall(entity) !== null
+  var available = !!entity
+    && (activate ? oneShotAvailable(entity) : !isUnavailable(entity))
   var result = {
     available: available,
     toggle: available && isToggleable(entity),
@@ -1279,8 +1289,22 @@ function controlKind(entity) {
   var dom = domain(entity)
   if (isToggleable(entity)) return "toggle"
   if (dom === "lock") return "lock"
-  if (dom === "scene" || dom === "script") return "activate"
+  if (activateCall(entity) !== null) return "activate"
   return "none"
+}
+
+// One-shot service for scenes, scripts, and buttons; null for anything else.
+function activateCall(entity) {
+  var dom = domain(entity)
+  if (dom === "scene" || dom === "script") {
+    return { domain: dom, service: "turn_on" }
+  }
+  if (PRESS_DOMAINS.indexOf(dom) !== -1) return { domain: dom, service: "press" }
+  return null
+}
+
+function activateLabel(entity) {
+  return PRESS_DOMAINS.indexOf(domain(entity)) !== -1 ? "Press" : "Activate"
 }
 
 // Seed picks for demo mode. Ids also live in bin/hass-bridge; test_model.js
@@ -1355,7 +1379,8 @@ var DOMAIN_FILTERS = [
   { id: "room_readings", title: "Room readings", domains: [] },
   { id: "lights", title: "Lights", domains: ["light"] },
   { id: "controls", title: "Controls",
-    domains: ["switch", "fan", "input_boolean", "humidifier", "lock", "scene", "script"] },
+    domains: ["switch", "fan", "input_boolean", "humidifier", "lock", "scene", "script",
+      "button", "input_button"] },
   { id: "climate", title: "Climate", domains: ["climate"] },
   { id: "media", title: "Media", domains: ["media_player"] },
   { id: "covers", title: "Covers", domains: ["cover"] },
