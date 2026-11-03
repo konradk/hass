@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../Model.js" as Model
 
 // Transport and volume for a media player.
@@ -12,7 +13,7 @@ Item {
   property var entity: null
   property QtObject bar: null
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
 
   implicitHeight: column.implicitHeight
