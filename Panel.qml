@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 import "PanelState.js" as PanelState
 
@@ -170,16 +171,16 @@ Panel {
   readonly property string icon: Model.BRAND_ICON
 
   readonly property color iconColor: {
-    var base = bar ? bar.barForeground : Color.foreground
+    var base = bar ? bar.barForeground : Commons.Color.foreground
     return phase === "connected" ? base : Qt.darker(base, 1.5)
   }
 
   // From the bar, as in every built-in panel, not the global defaults.
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(fg, 1.4)
-  readonly property color hoverFill: Style.hoverFillFor(fg, Color.accent)
-  readonly property color selectedFill: Style.selectedFillFor(fg, Color.accent)
+  readonly property color hoverFill: Style.hoverFillFor(fg, Commons.Color.accent)
+  readonly property color selectedFill: Style.selectedFillFor(fg, Commons.Color.accent)
 
   // The hero says which state; the body below says why. The full error here
   // would duplicate it and truncate at hero width.
@@ -334,7 +335,7 @@ Panel {
           iconComponent: Text {
             textFormat: Text.PlainText
             text: Model.BRAND_ICON
-            color: root.phase === "error" ? Color.urgent : root.fg
+            color: root.phase === "error" ? Commons.Color.urgent : root.fg
             font.family: root.family
             font.pixelSize: Style.font.display
           }

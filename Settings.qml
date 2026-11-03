@@ -4,6 +4,7 @@ import Quickshell.Wayland
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 import "Connection.js" as Connection
@@ -84,10 +85,10 @@ Item {
   }
 
   readonly property string family: Style.font.menuFamily
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
+  readonly property color background: Commons.Color.menu.background
+  readonly property color foreground: Commons.Color.menu.text
   readonly property var borderSpec: Border.surfaceSpec(
-    "menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+    "menu", "border", Commons.Color.menu.border, Math.max(1, Style.space(2)))
 
   function open(payloadJson) {
     root.opened = true
@@ -156,7 +157,7 @@ Item {
 
     Rectangle {
       anchors.fill: parent
-      color: Color.menu.scrim
+      color: Commons.Color.menu.scrim
     }
 
     MouseArea {
@@ -332,7 +333,7 @@ Item {
             Text {
               textFormat: Text.PlainText
               text: "Home Assistant URL"
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -350,7 +351,7 @@ Item {
               visible: root.urlDraft.trim().toLowerCase().indexOf("http://") === 0
                 || root.urlDraft.trim().toLowerCase().indexOf("ws://") === 0
               text: "Warning: this URL sends your long-lived access token without transport encryption. Use HTTPS unless this is a trusted local network."
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -395,7 +396,7 @@ Item {
                 && (root.localUrlDraft.trim().toLowerCase().indexOf("http://") === 0
                   || root.localUrlDraft.trim().toLowerCase().indexOf("ws://") === 0)
               text: "Warning: this URL sends your long-lived access token without transport encryption. Use HTTPS unless this is a trusted local network."
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -405,7 +406,7 @@ Item {
               textFormat: Text.PlainText
               visible: root.localUrlExpanded
               text: "Trusted Wi-Fi network name(s)"
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -432,7 +433,7 @@ Item {
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Currently on “" + root.detectedWifiSsid + "”."
-                color: Color.muted
+                color: Commons.Color.muted
                 font.family: root.family
                 font.pixelSize: Style.font.caption
               }
@@ -452,7 +453,7 @@ Item {
               width: connectionColumn.width
               visible: root.localUrlExpanded
               text: "Required. Comma-separated if your router has more than one (e.g. separate 2.4GHz/5GHz names). The local URL is only ever tried while connected to one of these — never on any other network, so the token can't be sent to whatever happens to answer at that address elsewhere."
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -468,7 +469,7 @@ Item {
               text: root.service && root.service.configured && !root.service.demoMode
                 ? "Access token · leave blank to keep the stored one"
                 : "Long-lived access token"
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -486,7 +487,7 @@ Item {
               width: connectionColumn.width
               visible: connectionPane.needsToken && root.urlDraft.trim().length > 0
               text: "Changing the server origin requires entering its token again."
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -560,10 +561,10 @@ Item {
             Rectangle {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(8); height: width; radius: width / 2
-              color: !root.service ? Color.muted
+              color: !root.service ? Commons.Color.muted
                    : root.service.phase === "connected" ? "#4caf50"
-                   : root.service.phase === "error" ? Color.urgent
-                   : Color.muted
+                   : root.service.phase === "error" ? Commons.Color.urgent
+                   : Commons.Color.muted
             }
 
             Text {
@@ -586,7 +587,7 @@ Item {
                 default: return root.service.lastError || "Idle"
                 }
               }
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.family
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
@@ -719,7 +720,7 @@ Item {
             text: root.service && !root.service.hasDevices
               ? "No devices yet — connect first."
               : "Nothing matches that search."
-            color: Color.muted
+            color: Commons.Color.muted
             font.family: root.family
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
@@ -796,7 +797,7 @@ Item {
             visible: devices.favorites.length === 0
             height: visible ? implicitHeight : 0
             text: "Nothing picked yet. Star a device on the left to put it in the panel."
-            color: Color.muted
+            color: Commons.Color.muted
             font.family: root.family
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap

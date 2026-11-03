@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // One line in the settings device browser: add or remove a favorite, and for
 // rows already in the list, move it up or down.
@@ -44,7 +45,7 @@ CursorSurface {
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(22)
       text: row.icon
-      color: Color.muted
+      color: Commons.Color.muted
       font.family: row.family
       font.pixelSize: Style.font.body
       horizontalAlignment: Text.AlignHCenter
@@ -63,7 +64,7 @@ CursorSurface {
         textFormat: Text.PlainText
         width: parent.width
         text: row.name
-        color: Color.foreground
+        color: Commons.Color.foreground
         font.family: row.family
         font.pixelSize: Style.font.bodySmall
         elide: Text.ElideRight
@@ -73,7 +74,7 @@ CursorSurface {
         textFormat: Text.PlainText
         width: parent.width
         text: row.detail
-        color: Color.muted
+        color: Commons.Color.muted
         font.family: row.family
         font.pixelSize: Style.font.caption
         elide: Text.ElideRight
@@ -94,8 +95,8 @@ CursorSurface {
         tooltipText: row.pinned
           ? "Do not keep expanded"
           : "Keep expanded when the panel opens"
-        foreground: row.pinned ? Color.accent : Color.muted
-        hoverColor: row.pinned ? Color.accent : Color.foreground
+        foreground: row.pinned ? Commons.Color.accent : Commons.Color.muted
+        hoverColor: row.pinned ? Commons.Color.accent : Commons.Color.foreground
         fontFamily: row.family
         onClicked: if (row.service) {
           if (row.roomReading) row.service.toggleRoomReadingPinned(row.entityId)
@@ -110,7 +111,7 @@ CursorSurface {
         visible: row.reorderable
         iconText: "󰅃"                       // md-chevron_up
         tooltipText: "Move up"
-        foreground: Color.muted
+        foreground: Commons.Color.muted
         fontFamily: row.family
         onClicked: if (row.service) row.service.movePanelItem(row.panelItemId, -1)
       }
@@ -120,7 +121,7 @@ CursorSurface {
         visible: row.reorderable
         iconText: "󰅀"                       // md-chevron_down
         tooltipText: "Move down"
-        foreground: Color.muted
+        foreground: Commons.Color.muted
         fontFamily: row.family
         onClicked: if (row.service) row.service.movePanelItem(row.panelItemId, 1)
       }
@@ -133,7 +134,7 @@ CursorSurface {
         tooltipText: row.roomReading
           ? (row.favorite ? "Remove room-reading card" : "Add room-reading card")
           : (row.favorite ? "Remove from panel" : "Add to panel")
-        foreground: row.favorite ? Color.foreground : Color.muted
+        foreground: row.favorite ? Commons.Color.foreground : Commons.Color.muted
         fontFamily: row.family
         onClicked: if (row.service) {
           if (row.roomReading) row.service.toggleRoomReading(row.entityId)

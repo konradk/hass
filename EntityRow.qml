@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "controls"
 
 // One device in the panel list, shaped after bluetooth/Panel.qml's DeviceRow.
@@ -47,7 +48,7 @@ CursorSurface {
     return expansion.item.activateSelector(index)
   }
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(fg, 1.4)
   readonly property color inactive: Qt.darker(fg, 1.5)
