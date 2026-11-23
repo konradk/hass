@@ -47,6 +47,7 @@ jobs:
           node tests/test_model.js
           node tests/test_row_model.js
           node tests/test_panel_state.js
+          node tests/test_list_sync.js
 
       - name: Service security and manifest contract
         run: python3 tests/test_service_contract.py
