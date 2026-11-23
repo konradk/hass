@@ -53,6 +53,7 @@ eq("typed values are normalized", parsed.config, {
   groupByArea: false,
   showEntityIcons: false,
   showPanelPinOnHover: true,
+  wrapAreaTabs: false,
   selectedTab: "area:kitchen",
   displayNameOverrides: { "light.a": "Desk" },
   iconOverrides: {}
@@ -61,6 +62,11 @@ eq("typed values are normalized", parsed.config, {
 const defaults = Config.parse("{}", []);
 eq("the panel pin hover shortcut is opt in",
    defaults.config.showPanelPinOnHover, false);
+eq("wrapping the area tabs is opt in",
+   defaults.config.wrapAreaTabs, false);
+eq("a truthy-but-not-true wrapAreaTabs is rejected",
+   Config.parse(JSON.stringify({ wrapAreaTabs: 1 }), []).config.wrapAreaTabs,
+   false);
 
 const withLocal = Config.parse(JSON.stringify({
   baseUrl: "https://ha.example.com",
