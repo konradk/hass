@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../Model.js" as Model
 
 // Colour for a colour-capable light: the light's favourite colours, then a
@@ -16,7 +17,7 @@ Column {
   property var entity: null
   property QtObject bar: null
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
 
   readonly property var liveColor: Model.hsColor(control.entity)
@@ -141,7 +142,7 @@ Column {
       anchors.horizontalCenter: parent.horizontalCenter
       width: Math.min(parent.width, implicitWidth)
       height: width
-      knobBorder: control.bar ? control.bar.background : Color.background
+      knobBorder: control.bar ? control.bar.background : Commons.Color.background
 
       hue: control.shownHue
       saturation: control.shownSaturation

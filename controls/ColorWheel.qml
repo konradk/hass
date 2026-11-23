@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // Hue/saturation wheel: angle around the centre is hue, distance from it is
 // saturation, as in the Home Assistant app.
@@ -13,7 +14,7 @@ Item {
 
   property real hue: 0
   property real saturation: 0
-  property color knobBorder: Color.background
+  property color knobBorder: Commons.Color.background
 
   // `moved` fires continuously while dragging, `released` once at the end;
   // `canceled` means the grab was taken away and nothing was chosen.

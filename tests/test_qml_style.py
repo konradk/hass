@@ -180,7 +180,7 @@ check(pin_index >= 0 and move_up_index >= 0 and move_down_index >= 0
 pin_block = next(block for _, block in blocks(settings_row, "PanelActionButton")
                  if "id: pinAction" in block)
 check("bordered:" not in pin_block
-      and "row.pinned ? Color.accent : Color.muted" in pin_block,
+      and "row.pinned ? Commons.Color.accent : Commons.Color.muted" in pin_block,
       "the settings pin uses geometry instead of colour to show saved state")
 check("pinned: modelData.pinned" in settings,
       "the Devices list does not project saved room pin state")

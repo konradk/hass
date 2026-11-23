@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../Model.js" as Model
 
 // Labelled slider in the shape the audio panel uses: a section header on the
@@ -23,7 +24,7 @@ Column {
   property bool snap: false
   property real stepBase: minimum
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
 
   signal moved(real value)

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../Model.js" as Model
 
 // Open / Close / Stop for a cover, plus a position slider for one that
@@ -13,7 +14,7 @@ Column {
   property var entity: null
   property QtObject bar: null
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
   readonly property var capabilities: Model.capabilitiesFor(entity)
 

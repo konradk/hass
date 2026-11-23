@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // Compact, generic environmental summary for one Home Assistant device.
 // Classification lives in Model.js; this component only renders the projected
@@ -20,7 +21,7 @@ Item {
   signal expansionRequested()
   signal pinRequested()
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property string family: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(fg, 1.4)
   readonly property bool pinPreview: card.showPanelPinOnHover
@@ -65,10 +66,10 @@ Item {
       radius: Style.cornerRadius
       visible: card.pinPreview
       color: card.pinned
-        ? Style.selectedFillFor(card.fg, Color.accent)
+        ? Style.selectedFillFor(card.fg, Commons.Color.accent)
         : Style.hoverFillFor(card.fg, card.dim)
       borderSpec: card.pinned
-        ? Border.controlSpec("selected", card.fg, Color.accent) : Border.none()
+        ? Border.controlSpec("selected", card.fg, Commons.Color.accent) : Border.none()
     }
 
     Text {
@@ -78,7 +79,7 @@ Item {
       anchors.centerIn: glyph
       visible: card.pinPreview
       text: ""                               // Font Awesome thumb tack
-      color: card.pinned ? Color.accent : card.dim
+      color: card.pinned ? Commons.Color.accent : card.dim
       font.family: card.family
       font.pixelSize: Style.font.heading
     }
@@ -186,10 +187,10 @@ Item {
         readonly property var reading: modelData
         readonly property color qualityColor: {
           switch (reading.quality) {
-          case "good": return Color.accent
+          case "good": return Commons.Color.accent
           case "moderate": return card.fg
-          case "poor": return Qt.lighter(Color.urgent, 1.28)
-          case "critical": return Color.urgent
+          case "poor": return Qt.lighter(Commons.Color.urgent, 1.28)
+          case "critical": return Commons.Color.urgent
           default: return card.dim
           }
         }
@@ -198,7 +199,7 @@ Item {
         height: metricName.implicitHeight + Style.spacing.xxs
           + metricValue.implicitHeight + Style.spacing.md
         radius: Style.cornerRadius
-        color: Style.normalFillFor(card.fg, qualityColor, Color.urgent)
+        color: Style.normalFillFor(card.fg, qualityColor, Commons.Color.urgent)
 
         Column {
           id: metricLabels
