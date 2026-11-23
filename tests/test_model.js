@@ -511,9 +511,9 @@ section("control classification", () => {
        { supported_features: 4, current_position: 50 })), true);
   eq("sensor does not", Model.isExpandable(entity("sensor.a", "5")), false);
   // Every expandable domain must have a control to expand into; EntityRow maps
-  // them by hand, and a camera has none.
-  eq("camera does not expand onto an empty panel",
-     Model.isExpandable(entity("camera.a", "streaming")), false);
+  // them by hand, and a camera's is its snapshot.
+  eq("camera expands into its snapshot",
+     Model.isExpandable(entity("camera.a", "streaming")), true);
 });
 
 section("entity capabilities", () => {
@@ -591,6 +591,27 @@ section("entity capabilities", () => {
     supported_features: 1 | 2 | 8
   }));
   eq("unavailable controls are disabled", unavailable.expandable, false);
+  eq("a camera expands to show its snapshot",
+     Model.capabilitiesFor(entity("camera.a", "idle")).cameraSnapshot, true);
+  eq("so its row is expandable",
+     Model.capabilitiesFor(entity("camera.a", "streaming")).expandable, true);
+  eq("an unavailable camera has no snapshot",
+     Model.capabilitiesFor(entity("camera.a", "unavailable")).cameraSnapshot, false);
+  eq("nothing else claims a snapshot",
+     Model.capabilitiesFor(entity("light.a", "on")).cameraSnapshot, false);
+  eq("a camera advertising STREAM can play live video",
+     Model.capabilitiesFor(entity("camera.a", "idle", { supported_features: 2 })).cameraStream,
+     true);
+  eq("one without it is snapshot-only",
+     Model.capabilitiesFor(entity("camera.a", "idle", { supported_features: 1 })).cameraStream,
+     false);
+  eq("an unavailable camera does not stream",
+     Model.capabilitiesFor(entity("camera.a", "unavailable", { supported_features: 2 }))
+       .cameraStream, false);
+  eq("cameras get their own settings filter",
+     Model.filterMatches("cameras", entity("camera.a", "idle")), true);
+  eq("which holds nothing else",
+     Model.filterMatches("cameras", entity("light.a", "on")), false);
   eq("scenes remain activatable despite unknown state",
      Model.capabilitiesFor(entity("scene.a", "unknown")).activate, true);
 });

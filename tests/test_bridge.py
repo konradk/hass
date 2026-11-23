@@ -915,6 +915,518 @@ def test_demo_needs_no_server():
         bridge.stop()
 
 
+# -- camera snapshots ----------------------------------------------------------
+
+def connected_bridge(server, env=None, *args):
+    bridge = BridgeProc(*args, env=env)
+    bridge.send({"op": "config", "url": server.url, "token": "tok"})
+    connected = bridge.wait_for(
+        lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+    check("connects first", connected is not None,
+          [e for e in bridge.snapshot() if e["ev"] in ("phase", "log")])
+    return bridge
+
+
+def snapshot_event(bridge, entity_id, after=0, budget=10.0):
+    return bridge.wait_for(
+        lambda e: e["ev"] == "snapshot" and e.get("entity_id") == entity_id,
+        budget=budget, after=after)
+
+
+def test_camera_snapshot_is_fetched():
+    print("camera: a snapshot is fetched over HTTP and handed over as a private file")
+    image = b"\xff\xd8" + os.urandom(2048) + b"\xff\xd9"
+    server = FakeHA(camera_image=image)
+    bridge = connected_bridge(server)
+    path = ""
+    try:
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("reports a snapshot", event is not None and event.get("ok") is True, event)
+        path = (event or {}).get("path", "")
+        check("snapshot events carry a generation",
+              event is not None and isinstance(event.get("generation"), int), event)
+        check("the file holds the image bytes",
+              os.path.isfile(path) and open(path, "rb").read() == image, path)
+        check("the snapshot directory is private",
+              os.path.isdir(os.path.dirname(path))
+              and os.stat(os.path.dirname(path)).st_mode & 0o077 == 0, path)
+        check("the snapshot file is private",
+              os.path.isfile(path) and os.stat(path).st_mode & 0o077 == 0, path)
+        request = server.camera_requests[0] if server.camera_requests else ("", "")
+        check("asks the camera proxy for that entity",
+              request[0] == "/api/camera_proxy/camera.front", request)
+        check("authenticates with the bearer token", request[1] == "Bearer tok", request)
+        check("the token never reaches the shell",
+              all("Bearer" not in json.dumps(e) and '"tok"' not in json.dumps(e)
+                  for e in bridge.snapshot()), bridge.snapshot())
+
+        after = len(bridge.snapshot())
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        second = snapshot_event(bridge, "camera.front", after=after)
+        check("a refresh lands in a new file so the image reloads",
+              second is not None and second.get("path") != path, second)
+        bridge.wait_for(lambda e: False, budget=0.3)
+        check("superseded snapshots are deleted", not os.path.exists(path), path)
+        path = (second or {}).get("path", path)
+    finally:
+        bridge.stop()
+        server.stop()
+    check("snapshots are removed when the bridge exits",
+          path and not os.path.exists(os.path.dirname(path)), path)
+
+
+def test_snapshot_refuses_anything_but_a_camera_id():
+    print("camera: only well-formed camera entity ids are fetched")
+    server = FakeHA()
+    bridge = connected_bridge(server)
+    try:
+        for bad in ("light.test", "camera.../../api/states", "camera.a?b=1",
+                    "camera.a/b", "camera.", "", 7):
+            bridge.send({"op": "snapshot", "entity_id": bad})
+        bridge.wait_for(lambda e: False, budget=1.0)
+        refusals = [e for e in bridge.snapshot()
+                    if e["ev"] == "snapshot" and e.get("ok") is False]
+        check("each refusal is reported", len(refusals) == 7, refusals)
+        check("nothing was requested", server.camera_requests == [],
+              server.camera_requests)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_snapshot_needs_a_connection():
+    print("camera: no snapshot is attempted before the connection is ready")
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("reports not connected",
+              event is not None and event.get("ok") is False, event)
+    finally:
+        bridge.stop()
+
+
+def test_snapshot_failures_never_echo_the_token():
+    print("camera: a failed snapshot is reported without the token")
+    server = FakeHA(camera_status=401, camera_content_type="text/plain",
+                    camera_body=b"bad token tok-secret-value")
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "token": "tok-secret-value"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("reports the failure", event is not None and event.get("ok") is False, event)
+        check("no path for a failure", event is not None and "path" not in event, event)
+        check("the token is not in any event",
+              all("tok-secret-value" not in json.dumps(e) for e in bridge.snapshot()))
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_snapshot_must_be_an_image():
+    print("camera: a non-image response is refused")
+    server = FakeHA(camera_content_type="text/html", camera_image=b"<html></html>")
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("refuses it", event is not None and event.get("ok") is False, event)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_oversized_snapshot_is_refused():
+    print("camera: an oversized snapshot is refused rather than buffered")
+    server = FakeHA(camera_image=b"\0" * (9 * 1024 * 1024))
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("refuses it", event is not None and event.get("ok") is False, event)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_snapshot_ignores_proxy_environment():
+    print("security: proxy environment cannot intercept a snapshot request")
+    server = FakeHA()
+    bridge = connected_bridge(server, env={
+        "HTTP_PROXY": "http://127.0.0.1:1",
+        "HTTPS_PROXY": "http://127.0.0.1:1",
+        "ALL_PROXY": "http://127.0.0.1:1",
+        "NO_PROXY": "",
+        "no_proxy": "",
+    })
+    try:
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("fetches directly", event is not None and event.get("ok") is True, event)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_snapshot_over_tls():
+    print("camera: snapshots follow the connection over https")
+    server = FakeHA(tls=True)
+    bridge = connected_bridge(server, None, "--insecure")
+    try:
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("fetches over https", event is not None and event.get("ok") is True, event)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_snapshot_uses_the_connected_local_url():
+    print("camera: a snapshot goes to the address the connection went through")
+    local = FakeHA()
+    bridge = BridgeProc(env={"HASS_BRIDGE_TEST_SSID": "Home"})
+    try:
+        bridge.send({"op": "config", "url": "http://127.0.0.1:1",
+                     "localUrl": local.url, "trustedNetwork": "Home", "token": "tok"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "snapshot", "entity_id": "camera.front"})
+        event = snapshot_event(bridge, "camera.front")
+        check("fetches through the local URL",
+              event is not None and event.get("ok") is True
+              and len(local.camera_requests) == 1, event)
+    finally:
+        bridge.stop()
+        local.stop()
+
+
+def test_demo_camera_snapshot():
+    print("demo: the demo camera produces a snapshot")
+    bridge = BridgeProc("--demo")
+    try:
+        bridge.send({"op": "config"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "snapshot", "entity_id": "camera.garage_driveway"})
+        event = snapshot_event(bridge, "camera.garage_driveway")
+        check("reports a snapshot", event is not None and event.get("ok") is True, event)
+        path = (event or {}).get("path", "")
+        check("writes an image file", os.path.isfile(path) and os.path.getsize(path) > 0,
+              path)
+    finally:
+        bridge.stop()
+
+
+# -- camera streams ------------------------------------------------------------
+
+def stream_event(bridge, entity_id, after=0, budget=10.0):
+    return bridge.wait_for(
+        lambda e: e["ev"] == "stream" and e.get("entity_id") == entity_id,
+        budget=budget, after=after)
+
+
+def local_get(url, raw_path=None):
+    """GET from the bridge's relay without any proxy, returning (status, body).
+
+    raw_path sends that request target verbatim, past any client-side
+    normalisation, to probe what the relay itself accepts.
+    """
+    import http.client
+    import urllib.parse
+    parts = urllib.parse.urlsplit(url)
+    if not parts.hostname:
+        return None, b"no stream url"
+    conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=5)
+    try:
+        target = raw_path if raw_path is not None else (
+            parts.path + ("?" + parts.query if parts.query else ""))
+        conn.request("GET", target)
+        response = conn.getresponse()
+        return response.status, response.read()
+    finally:
+        conn.close()
+
+
+def sibling(url, name):
+    return url.rsplit("/", 1)[0] + "/" + name
+
+
+def test_camera_stream_is_relayed_over_loopback():
+    print("stream: Home Assistant's HLS stream is relayed through loopback")
+    server = FakeHA()
+    bridge = connected_bridge(server, env={
+        "HTTP_PROXY": "http://127.0.0.1:1",
+        "HTTPS_PROXY": "http://127.0.0.1:1",
+        "ALL_PROXY": "http://127.0.0.1:1",
+        "NO_PROXY": "",
+        "no_proxy": "",
+    })
+    try:
+        bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+        event = stream_event(bridge, "camera.front")
+        check("reports a stream", event is not None and event.get("ok") is True, event)
+        url = (event or {}).get("url", "")
+        check("the stream is served from loopback only",
+              url.startswith("http://127.0.0.1:"), url)
+        check("asks Home Assistant for an HLS stream of that camera",
+              server.stream_calls
+              and server.stream_calls[0].get("entity_id") == "camera.front"
+              and server.stream_calls[0].get("format") == "hls", server.stream_calls)
+        check("Home Assistant's stream token does not reach the shell",
+              server.stream_token not in json.dumps(bridge.snapshot()), url)
+
+        status, body = local_get(url)
+        check("relays the master playlist",
+              status == 200 and body == server.hls_files["master_playlist.m3u8"],
+              (status, body))
+        status, body = local_get(sibling(url, "playlist.m3u8?_HLS_msn=3&_HLS_part=1"))
+        check("relays a blocking playlist request", status == 200, (status, body))
+        status, body = local_get(sibling(url, "segment/0.m4s"))
+        check("relays a segment", status == 200 and body == b"segment-bytes",
+              (status, body))
+        paths = [p for p, _ in server.hls_requests]
+        check("forwards to the stream's own path, query included",
+              "/api/hls/hlstoken123/playlist.m3u8?_HLS_msn=3&_HLS_part=1" in paths,
+              paths)
+        check("never sends the long-lived token with stream requests",
+              all(auth == "" for _, auth in server.hls_requests),
+              server.hls_requests)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_compressed_playlists_keep_their_encoding():
+    print("stream: a gzipped playlist is relayed with its Content-Encoding")
+    import gzip
+    import http.client
+    import urllib.parse
+    server = FakeHA(hls_gzip=True)
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+        url = (stream_event(bridge, "camera.front") or {}).get("url", "")
+        parts = urllib.parse.urlsplit(url)
+        encoding, body = "", b""
+        if parts.hostname:
+            conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=5)
+            conn.request("GET", parts.path)
+            response = conn.getresponse()
+            encoding = response.getheader("Content-Encoding") or ""
+            body = response.read()
+            conn.close()
+        check("passes Content-Encoding through", encoding == "gzip", encoding)
+        check("the body is the gzipped playlist",
+              body[:2] == b"\x1f\x8b"
+              and gzip.decompress(body) == server.hls_files["master_playlist.m3u8"],
+              body[:20])
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+# Home Assistant's live playlist, as served for a real camera: three 2 s
+# segments with per-segment timestamps and a start offset.
+LIVE_PLAYLIST = (
+    b"#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+    b"#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-TARGETDURATION:2\n"
+    b"#EXT-X-MEDIA-SEQUENCE:6\n#EXT-X-DISCONTINUITY-SEQUENCE:0\n"
+    b"#EXT-X-START:TIME-OFFSET=-3.003,PRECISE=YES\n"
+    b"#EXT-X-PROGRAM-DATE-TIME:2026-10-12T10:46:29.962Z\n#EXTINF:2.002,\n"
+    b"./segment/6.m4s\n"
+    b"#EXT-X-DISCONTINUITY\n"
+    b"#EXT-X-PROGRAM-DATE-TIME:2026-10-12T10:46:31.964Z\n#EXTINF:2.001,\n"
+    b"./segment/7.m4s\n"
+    b"#EXT-X-PROGRAM-DATE-TIME:2026-10-12T10:46:33.965Z\n#EXTINF:2.002,\n"
+    b"./segment/8.m4s\n")
+
+
+def live_stream(**fake_options):
+    files = {"master_playlist.m3u8": b"#EXTM3U\nplaylist.m3u8\n",
+             "playlist.m3u8": LIVE_PLAYLIST,
+             "init.mp4": b"init-bytes",
+             "segment/8.m4s": b"segment-8"}
+    server = FakeHA(hls_files=files, **fake_options)
+    bridge = connected_bridge(server)
+    bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+    url = (stream_event(bridge, "camera.front") or {}).get("url", "")
+    return server, bridge, url
+
+
+def test_first_playlist_starts_at_the_live_edge():
+    print("stream: playback starts at the newest segment, not three back")
+    server, bridge, url = live_stream(hls_gzip=True)
+    try:
+        status, master = local_get(url)
+        check("the master playlist is untouched", status == 200, (status, master))
+        status, body = local_get(sibling(url, "playlist.m3u8"))
+        text = body.decode("utf-8", "replace")
+        check("relays the media playlist uncompressed",
+              status == 200 and text.startswith("#EXTM3U"), body[:20])
+        check("keeps only the newest segment",
+              "segment/8.m4s" in text and "segment/7.m4s" not in text
+              and "segment/6.m4s" not in text, text)
+        check("renumbers the media sequence to that segment",
+              "#EXT-X-MEDIA-SEQUENCE:8\n" in text, text)
+        check("counts the dropped discontinuity",
+              "#EXT-X-DISCONTINUITY-SEQUENCE:1\n" in text, text)
+        check("keeps the init section and target duration",
+              '#EXT-X-MAP:URI="init.mp4"' in text and "#EXT-X-TARGETDURATION:2" in text,
+              text)
+        check("keeps the kept segment's timestamp",
+              "2026-10-12T10:46:33.965Z" in text
+              and "2026-10-12T10:46:31.964Z" not in text, text)
+        check("drops the start offset that points back into removed segments",
+              "EXT-X-START" not in text, text)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_playlists_pass_through_once_playing():
+    print("stream: once a segment has played, playlists are relayed whole")
+    server, bridge, url = live_stream()
+    try:
+        local_get(url)
+        local_get(sibling(url, "playlist.m3u8"))
+        status, _ = local_get(sibling(url, "segment/8.m4s"))
+        check("serves the segment", status == 200, status)
+        status, body = local_get(sibling(url, "playlist.m3u8"))
+        check("the next playlist is Home Assistant's own",
+              status == 200 and body == LIVE_PLAYLIST, body)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_stream_relay_refuses_strangers():
+    print("stream: the relay serves only its own secret path")
+    server = FakeHA()
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+        url = (stream_event(bridge, "camera.front") or {}).get("url", "")
+        base = url.rsplit("/", 1)[0]
+        prefix = base[len(base.split("/", 3)[0] + "//" + base.split("/", 3)[2]):]
+        before = len(server.hls_requests)
+        for raw in ("/wrongsecret/master_playlist.m3u8",
+                    "/master_playlist.m3u8",
+                    prefix + "/../../api/states",
+                    prefix + "/%2e%2e/%2e%2e/api/states",
+                    prefix + "/segment/../../../api/config",
+                    prefix + "//api/states",
+                    prefix + "/playlist.m3u8?x=<script>"):
+            status, _ = local_get(url, raw_path=raw)
+            check("refuses %s" % raw, status in (400, 404), status)
+        check("none of them reached Home Assistant",
+              len(server.hls_requests) == before, server.hls_requests[before:])
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_stopped_stream_is_gone():
+    print("stream: stopping a stream closes its relay path")
+    server = FakeHA()
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+        url = (stream_event(bridge, "camera.front") or {}).get("url", "")
+        bridge.send({"op": "stream_stop", "entity_id": "camera.front"})
+        bridge.wait_for(lambda e: False, budget=0.5)
+        status, _ = local_get(url)
+        check("the stopped stream is no longer served", status == 404, status)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_reconfiguring_ends_streams():
+    print("stream: a new connection generation ends every stream")
+    server = FakeHA()
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+        url = (stream_event(bridge, "camera.front") or {}).get("url", "")
+        bridge.send({"op": "config", "url": server.url, "token": "other",
+                     "generation": 5})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e.get("generation") == 5)
+        status, _ = local_get(url)
+        check("the old stream is no longer served", status == 404, status)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_stream_failure_is_reported():
+    print("stream: a camera that cannot stream is reported, for the snapshot fallback")
+    server = FakeHA(stream_fail=True)
+    bridge = connected_bridge(server)
+    try:
+        bridge.send({"op": "stream_start", "entity_id": "camera.front"})
+        event = stream_event(bridge, "camera.front")
+        check("reports the failure",
+              event is not None and event.get("ok") is False and "url" not in event,
+              event)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_stream_refuses_anything_but_a_camera_id():
+    print("stream: only well-formed camera entity ids are streamed")
+    server = FakeHA()
+    bridge = connected_bridge(server)
+    try:
+        for bad in ("light.test", "camera.a/b", "", None):
+            bridge.send({"op": "stream_start", "entity_id": bad})
+        bridge.wait_for(lambda e: False, budget=1.0)
+        refusals = [e for e in bridge.snapshot()
+                    if e["ev"] == "stream" and e.get("ok") is False]
+        check("each refusal is reported", len(refusals) == 4, refusals)
+        check("nothing was asked of Home Assistant", server.stream_calls == [],
+              server.stream_calls)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_demo_has_no_stream():
+    print("demo: the demo camera falls back to snapshots")
+    bridge = BridgeProc("--demo")
+    try:
+        bridge.send({"op": "config"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        bridge.send({"op": "stream_start", "entity_id": "camera.garage_driveway"})
+        event = stream_event(bridge, "camera.garage_driveway")
+        check("reports no stream", event is not None and event.get("ok") is False, event)
+    finally:
+        bridge.stop()
+
+
+def test_stale_snapshot_directories_are_swept():
+    print("camera: snapshot directories left by a killed bridge are removed")
+    import tempfile
+    runtime = tempfile.mkdtemp(prefix="hass-test-runtime-")
+    dead = os.path.join(runtime, "hass-snapshots-%d-abc" % 2 ** 22)
+    alive = os.path.join(runtime, "hass-snapshots-%d-def" % os.getpid())
+    unrelated = os.path.join(runtime, "something-else")
+    for path in (dead, alive, unrelated):
+        os.mkdir(path, 0o700)
+    bridge = BridgeProc("--demo", env={"XDG_RUNTIME_DIR": runtime})
+    try:
+        bridge.send({"op": "config"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        check("removes a dead bridge's directory", not os.path.exists(dead))
+        check("keeps a running bridge's directory", os.path.isdir(alive))
+        check("leaves unrelated directories alone", os.path.isdir(unrelated))
+    finally:
+        bridge.stop()
+        import shutil
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
 def main():
     for test in (test_live_happy_path,
                  test_rejected_service_call_is_reported,
@@ -948,7 +1460,28 @@ def main():
                  test_local_url_is_skipped_off_the_trusted_network,
                  test_local_url_without_a_trusted_network_is_never_used,
                  test_unknown_wifi_state_fails_closed,
-                 test_demo_needs_no_server):
+                 test_demo_needs_no_server,
+                 test_camera_snapshot_is_fetched,
+                 test_snapshot_refuses_anything_but_a_camera_id,
+                 test_snapshot_needs_a_connection,
+                 test_snapshot_failures_never_echo_the_token,
+                 test_snapshot_must_be_an_image,
+                 test_oversized_snapshot_is_refused,
+                 test_snapshot_ignores_proxy_environment,
+                 test_snapshot_over_tls,
+                 test_snapshot_uses_the_connected_local_url,
+                 test_demo_camera_snapshot,
+                 test_camera_stream_is_relayed_over_loopback,
+                 test_compressed_playlists_keep_their_encoding,
+                 test_first_playlist_starts_at_the_live_edge,
+                 test_playlists_pass_through_once_playing,
+                 test_stream_relay_refuses_strangers,
+                 test_stopped_stream_is_gone,
+                 test_reconfiguring_ends_streams,
+                 test_stream_failure_is_reported,
+                 test_stream_refuses_anything_but_a_camera_id,
+                 test_demo_has_no_stream,
+                 test_stale_snapshot_directories_are_swept):
         test()
         print()
 
