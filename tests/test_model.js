@@ -119,6 +119,8 @@ section("badges", () => {
      Model.badgeText(entity("button.a", "2026-10-12T08:15:00.000000+00:00")), "Button");
   eq("an input_button too",
      Model.badgeText(entity("input_button.a", "unknown")), "Button");
+  eq("an unavailable button says so rather than naming its kind",
+     Model.badgeText(entity("button.a", "unavailable")), "Unavailable");
   // hvac_action is what a real climate entity exposes; the mode is the state.
   eq("climate prefers hvac_action",
      Model.badgeText(entity("climate.a", "heat", { hvac_action: "idle" })), "Idle");

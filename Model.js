@@ -117,7 +117,12 @@ function subtitle(entity, unitFallback) {
 function badgeText(entity) {
   var dom = domain(entity)
   if (dom === "scene") return "Scene"
-  if (PRESS_DOMAINS.indexOf(dom) !== -1) return "Button"
+  // Only an unavailable button ever shows its badge (an available one shows
+  // the Press action instead), so the kind must not hide that it is gone.
+  if (PRESS_DOMAINS.indexOf(dom) !== -1) {
+    return stateOf(entity) === "unavailable"
+      ? "Unavailable" : "Button"
+  }
   if (dom === "camera") return "Camera"
   if (dom === "climate") {
     // The HVAC mode is the entity's state, not an attribute; `hvac_action` is

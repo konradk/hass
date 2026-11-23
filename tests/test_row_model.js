@@ -80,6 +80,24 @@ const missing = Rows.project("light.missing", null, {
 eq("missing favorites remain identifiable", missing.name, "light.missing");
 eq("missing favorites are unavailable", missing.available, false);
 
+const buttonContext = {
+  name: "Front door", icon: "B", isOn: false, pending: false,
+  temperatureUnit: "", entityArea: {}, areaNames: {}
+};
+const pressedButton = Rows.project("button.front_door", {
+  entity_id: "button.front_door", state: "2026-10-12T08:15:00.000000+00:00",
+  attributes: { friendly_name: "Front door" }
+}, buttonContext, Model);
+eq("a pressed button is a pressable one-shot row",
+   [pressedButton.control, pressedButton.available], ["activate", true]);
+const goneButton = Rows.project("button.front_door", {
+  entity_id: "button.front_door", state: "unavailable",
+  attributes: { friendly_name: "Front door" }
+}, buttonContext, Model);
+eq("an unavailable button row is inert and says it is unavailable",
+   [goneButton.control, goneButton.available, goneButton.badge],
+   ["none", false, "Unavailable"]);
+
 console.log();
 if (failures) {
   console.log(`FAILED: ${failures} of ${checks} checks`);
